@@ -1,10 +1,11 @@
 """
-CLI Entry point to run Vehicle ALPR Tracking Pipeline.
+CLI Entry point to run Vehicle ALPR Tracking Pipeline (Phase 1).
 Example:
     python run.py --source input_video.mp4 --output-video output/annotated.mp4
 """
 
 import argparse
+import json
 from pathlib import Path
 
 from config import PipelineConfig
@@ -12,12 +13,12 @@ from pipeline import VehicleALPRPipeline
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Vehicle ALPR Single-Detection Pipeline")
+    parser = argparse.ArgumentParser(description="Vehicle ALPR Single-Detection Pipeline (Phase 1)")
     parser.add_argument(
         "--source",
         type=str,
         required=True,
-        help="Path to input video file (e.g. video.mp4), image, or camera index (e.g. 0).",
+        help="Path to input video file (e.g. stream.mp4), RTSP stream, or camera index (e.g. 0).",
     )
     parser.add_argument(
         "--output-video",
@@ -34,14 +35,14 @@ def parse_args():
     parser.add_argument(
         "--vehicle-conf",
         type=float,
-        default=0.40,
-        help="Confidence threshold for vehicle detection (default: 0.40).",
+        default=0.35,
+        help="Confidence threshold for vehicle detection (default: 0.35).",
     )
     parser.add_argument(
         "--alpr-interval",
         type=int,
         default=2,
-        help="Run ALPR every K frames to optimize CPU usage (default: 2).",
+        help="Run ALPR every K frames to optimize compute (default: 2).",
     )
     parser.add_argument(
         "--min-track-frames",
@@ -52,26 +53,68 @@ def parse_args():
     parser.add_argument(
         "--disappeared-frames",
         type=int,
-        default=30,
-        help="Frames before an untracked vehicle is considered disappeared (default: 30).",
+        default=45,
+        help="Frames before an untracked vehicle is considered disappeared (default: 45).",
     )
     parser.add_argument(
-        "--vehicle-model",
-        type=str,
-        default="yolov8n.pt",
-        help="Vehicle detector model weight file or name (default: yolov8n.pt).",
+        "--min-area",
+        type=float,
+        default=8000.0,
+        help="Minimum vehicle box area to be considered readable (default: 8000).",
     )
     parser.add_argument(
-        "--show",
+        "--preview",
         action="store_true",
         default=True,
-        help="Display live GUI window with realtime tracking (default: enabled).",
+        help="Enable Colab real-time visual preview via IPython.display (default: enabled).",
     )
     parser.add_argument(
-        "--no-show",
-        dest="show",
+        "--no-preview",
+        dest="preview",
         action="store_false",
-        help="Disable live GUI display (headless mode).",
+        help="Disable live visual preview.",
+    )
+    parser.add_argument(
+        "--save-video",
+        action="store_true",
+        default=True,
+        help="Save annotated output video file (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-save-video",
+        dest="save_video",
+        action="store_false",
+        help="Do not save output video file to disk.",
+    )
+    parser.add_argument(
+        "--sync-realtime",
+        action="store_true",
+        default=True,
+        help="Synchronize playback to real wall-clock time (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-sync-realtime",
+        dest="sync_realtime",
+        action="store_false",
+        help="Process video as fast as possible without real-time pacing.",
+    )
+    parser.add_argument(
+        "--enforce-regex",
+        action="store_true",
+        default=False,
+        help="Strictly enforce country regex validation on plate reads.",
+    )
+    parser.add_argument(
+        "--include-remarks",
+        action="store_true",
+        default=False,
+        help="Include optional 'remarks' field in JSON event output.",
+    )
+    parser.add_argument(
+        "--roi",
+        type=str,
+        default=None,
+        help="Optional JSON string of ROI polygon coordinates, e.g. '[[100,200],[1100,200],[1200,700],[50,700]]'",
     )
     parser.add_argument(
         "--max-frames",
@@ -85,20 +128,32 @@ def parse_args():
 def main():
     args = parse_args()
 
+    roi_poly = None
+    if args.roi:
+        try:
+            roi_poly = json.loads(args.roi)
+        except Exception as e:
+            print(f"[CONFIG WARNING] Could not parse --roi JSON: {e}")
+
     config = PipelineConfig(
         camera_id=args.camera_id,
-        vehicle_model_name=args.vehicle_model,
         vehicle_conf_thresh=args.vehicle_conf,
         alpr_frame_interval=args.alpr_interval,
         min_track_frames=args.min_track_frames,
         max_disappeared_frames=args.disappeared_frames,
+        min_readable_vehicle_area=args.min_area,
+        show_preview=args.preview,
+        save_video=args.save_video,
+        sync_realtime=args.sync_realtime,
+        enforce_regex=args.enforce_regex,
+        include_remarks=args.include_remarks,
+        roi_polygon=roi_poly,
     )
 
     pipeline = VehicleALPRPipeline(config=config)
     pipeline.process_video(
         video_source=args.source,
         output_video_path=args.output_video,
-        show_display=args.show,
         max_frames=args.max_frames,
     )
 

@@ -1,0 +1,8 @@
+# Custom ByteTrack Tracker Settings for High-Stability Tracking & Low ID Churn
+tracker_type: bytetrack
+track_high_thresh: 0.35   # Threshold for first-round association
+track_low_thresh: 0.10    # Low-confidence detections threshold for second-round association
+new_track_thresh: 0.45    # Threshold to initialize a new track
+track_buffer: 90          # Number of frames to keep a lost track alive (3 seconds at 30 fps)
+match_thresh: 0.75        # IoU matching threshold for association
+fuse_score: True          # Fuse detection score with similarity score
