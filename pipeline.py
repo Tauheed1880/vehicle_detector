@@ -502,24 +502,29 @@ class VehicleALPRPipeline:
 
         if raw_output_path is not None and raw_output_path.exists():
             final_out = Path(output_video_path)
-            if self.config.convert_h264 and shutil.which("ffmpeg"):
-                print(f"[FFMPEG] Converting video to browser-compatible H.264 (libx264 + yuv420p)...")
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if self.config.convert_h264 and ffmpeg_bin:
+                print(f"[FFMPEG] Converting video to browser-compatible H.264 (libx264 + yuv420p + faststart)...")
                 ffmpeg_cmd = [
-                    "ffmpeg", "-y",
+                    ffmpeg_bin, "-y",
                     "-i", str(raw_output_path),
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
                     "-preset", "fast",
                     "-crf", "23",
+                    "-movflags", "+faststart",
                     str(final_out),
                 ]
-                res = subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
                 if res.returncode == 0:
                     raw_output_path.unlink(missing_ok=True)
-                    print(f"[FFMPEG] H.264 conversion complete: {final_out.resolve()}")
+                    print(f"[FFMPEG] Universal H.264 video saved: {final_out.resolve()}")
                 else:
+                    print(f"[FFMPEG WARNING] ffmpeg returned error {res.returncode}: {res.stderr.strip()[:200]}")
                     raw_output_path.rename(final_out)
             else:
+                if not ffmpeg_bin:
+                    print("[FFMPEG NOTE] ffmpeg not installed. Video saved as standard mp4v container.")
                 raw_output_path.rename(final_out)
 
             if self.config.drive_output_dir.exists():
