@@ -39,6 +39,7 @@ class PipelineConfig:
     # Readable Zone (ROI) & Distance Filtering
     # Far-away vehicles outside the readable zone are NOT counted as "NO PLATE"
     # -------------------------------------------------------------
+    enable_smart_gating: bool = True
     min_vehicle_width: int = 70
     min_vehicle_height: int = 50
     min_readable_vehicle_area: float = 8000.0  # Minimum box area to be considered readable
