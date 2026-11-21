@@ -1,11 +1,13 @@
 """
 Configuration settings for Vehicle Tracking and FastALPR Pipeline (Phase 1 & Phase 2 Ready).
 All thresholds, paths, model names, ROI polygons, and performance settings are defined here.
+Supports Pakistani, General, and UK plate formats, multi-camera JSON setups, and enterprise deployments.
 """
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -14,6 +16,9 @@ class PipelineConfig:
     # Camera & System Identification
     # -------------------------------------------------------------
     camera_id: str = "CAM-00001"
+    camera_name: str = "Main Boulevard - North Entry Lane 1"
+    camera_location: str = "North Gate Toll Plaza / Entry Checkpost 1"
+    rtsp_url: str = ""
 
     # -------------------------------------------------------------
     # Vehicle Detector & Tracker Configuration
@@ -65,16 +70,15 @@ class PipelineConfig:
     # ALPR Mode: Run on vehicle crops (much faster) vs full frame
     alpr_on_crops: bool = True
 
-    # Plate Quality & UK Standard Rules
-    min_plate_length: int = 7             # UK current standard is exactly 7 characters
-    min_plate_sharpness: float = 30.0
+    # Plate Format Standard: "PAKISTAN", "GENERAL", or "UK"
+    plate_format: str = "PAKISTAN"
+    plate_country_code: str = "PK"
+    min_plate_length: int = 4              # Pakistani plates can be 4-8 chars (e.g. ICT123, LEA185001)
+    min_plate_sharpness: float = 25.0
     min_plate_reads_for_event: int = 2     # Minimum plate reads needed before declaring confident
-    # UK Plate format regex: 2 letters, 2 digits, 3 letters (e.g. AB12CDE)
-    plate_country_code: str = "UK"
-    plate_regex_pattern: str = r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$"
+    plate_regex_pattern: Optional[str] = None
     enforce_regex: bool = False
-    # UK Syntax Correction: enforce letters at positions 0,1,4,5,6 and digits at 2,3
-    uk_syntax_correction: bool = True
+    uk_syntax_correction: bool = False
     # Partial plate policy: "drop" (ignore incomplete reads) or "keep_low_conf"
     partial_plate_policy: str = "drop"
 
@@ -83,7 +87,7 @@ class PipelineConfig:
     # -------------------------------------------------------------
     min_track_frames: int = 6             # Minimum frames tracked before emitting event
     max_disappeared_frames: int = 45      # Frames lost before closing track (1.5s at 30 fps)
-    min_confident_plate_conf: float = 0.75
+    min_confident_plate_conf: float = 0.70
     duplicate_plate_window_sec: float = 60.0  # Suppress duplicate events within 60s
     fuzzy_plate_max_distance: int = 2         # Max Levenshtein distance for duplicate matching
     box_smoothing_factor: float = 0.65        # EMA box smoothing
@@ -124,3 +128,72 @@ class PipelineConfig:
         self.events_jsonl_path = Path(self.events_jsonl_path)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self.base_output_dir.mkdir(parents=True, exist_ok=True)
+
+        fmt = self.plate_format.upper()
+        if fmt == "PAKISTAN":
+            self.plate_country_code = "PK"
+            self.uk_syntax_correction = False
+            if self.plate_regex_pattern is None:
+                # Flexible Pakistani pattern: Letters (province/city) + optional series/year + numbers
+                self.plate_regex_pattern = r"^[A-Z]{1,4}[0-9]{1,5}$|^[A-Z]{1,4}[0-9]{1,2}[A-Z]{0,2}[0-9]{1,4}$"
+            if self.min_plate_length == 7:  # If default was UK's 7, relax to 4
+                self.min_plate_length = 4
+        elif fmt == "UK":
+            self.plate_country_code = "UK"
+            self.uk_syntax_correction = True
+            if self.plate_regex_pattern is None:
+                self.plate_regex_pattern = r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$"
+            self.min_plate_length = 7
+        else:  # GENERAL
+            self.plate_country_code = "GEN"
+            self.uk_syntax_correction = False
+            if self.plate_regex_pattern is None:
+                self.plate_regex_pattern = r"^[A-Z0-9]{3,12}$"
+            if self.min_plate_length == 7:
+                self.min_plate_length = 4
+
+
+def load_camera_from_json(
+    json_path: Union[str, Path],
+    camera_id: str,
+    base_config: Optional[PipelineConfig] = None,
+) -> PipelineConfig:
+    """
+    Loads camera configuration for a specific camera_id from cameras.json.
+    Falls back gracefully if file or camera is not found.
+    """
+    cfg = base_config or PipelineConfig()
+    path = Path(json_path)
+
+    if not path.exists():
+        print(f"[CONFIG WARNING] Camera config file not found: {path}. Using default configuration.")
+        return cfg
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        cameras_list = data.get("cameras", [])
+        matched = next((c for c in cameras_list if c.get("camera_id") == camera_id), None)
+
+        if not matched:
+            print(f"[CONFIG WARNING] Camera ID '{camera_id}' not found in {path}. Using default configuration.")
+            return cfg
+
+        cfg.camera_id = matched.get("camera_id", camera_id)
+        cfg.camera_name = matched.get("name", cfg.camera_name)
+        cfg.camera_location = matched.get("location", cfg.camera_location)
+        cfg.rtsp_url = matched.get("rtsp_url", cfg.rtsp_url)
+        if "plate_format" in matched:
+            cfg.plate_format = matched["plate_format"]
+        if "min_readable_vehicle_area" in matched:
+            cfg.min_readable_vehicle_area = float(matched["min_readable_vehicle_area"])
+        if "roi_polygon" in matched and matched["roi_polygon"]:
+            cfg.roi_polygon = matched["roi_polygon"]
+
+        cfg.__post_init__()
+        print(f"[CONFIG LOADED] Successfully loaded camera '{camera_id}': {cfg.camera_name} ({cfg.camera_location})")
+        return cfg
+    except Exception as e:
+        print(f"[CONFIG ERROR] Failed to parse {path}: {e}. Using defaults.")
+        return cfg

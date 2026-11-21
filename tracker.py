@@ -189,6 +189,35 @@ def filter_nested_boxes(
     return kept_boxes, kept_scores
 
 
+def normalize_pakistan_plate_syntax(plate: str) -> str:
+    """
+    Normalizes standard Pakistani license plate formats (e.g. LEA-18-5001, ICT-VS-221, MNP-123, FD-1234).
+    Resolves optical character confusion between digits and letters based on Pakistani prefix/suffix layout:
+    - Leading 2 to 4 characters are alphabetic jurisdiction codes (e.g. LEA, ICT, LHR, KHI, FD, MNP, ISB).
+    - Trailing characters are predominantly digits.
+    """
+    clean = re.sub(r"[^A-Z0-9]", "", plate.upper())
+    if len(clean) < 3:
+        return clean
+
+    digit_to_letter = {"0": "O", "1": "I", "5": "S", "8": "B", "2": "Z", "6": "G"}
+    letter_to_digit = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"}
+
+    chars = list(clean)
+
+    # Pakistani prefixes: check if first 2-3 characters look like digits mistaken for letters
+    for i in range(min(2, len(chars))):
+        if chars[i] in digit_to_letter and any(c.isalpha() for c in chars[:3]):
+            chars[i] = digit_to_letter[chars[i]]
+
+    # Trailing part: if the tail (last 2-4 characters) is numeric, fix letter confusions
+    for i in range(max(2, len(chars) - 4), len(chars)):
+        if chars[i] in letter_to_digit and any(c.isdigit() for c in chars[-3:]):
+            chars[i] = letter_to_digit[chars[i]]
+
+    return "".join(chars)
+
+
 def normalize_uk_plate_syntax(plate: str) -> str:
     """
     Normalizes standard UK plate format (2 letters, 2 digits, 3 letters e.g. AB12CDE).
@@ -221,13 +250,15 @@ def normalize_uk_plate_syntax(plate: str) -> str:
 
 def character_level_voting(
     readings: List[Tuple[str, float]],
-    min_length: int = 7,
+    min_length: int = 4,
     regex_pattern: Optional[str] = None,
-    uk_syntax_correction: bool = True,
+    uk_syntax_correction: bool = False,
+    plate_format: str = "PAKISTAN",
 ) -> Optional[Tuple[str, float]]:
     """
     Performs confidence-squared ($conf^2$) weighted character voting across multiple plate readings.
     High confidence reads dominate, eliminating flickering run-to-run discrepancies.
+    Supports Pakistani, UK, and General plate syntax.
     """
     if not readings:
         return None
@@ -237,8 +268,10 @@ def character_level_voting(
 
     for text, conf in readings:
         clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
-        if uk_syntax_correction and len(clean_text) == 7:
+        if plate_format == "UK" and uk_syntax_correction and len(clean_text) == 7:
             clean_text = normalize_uk_plate_syntax(clean_text)
+        elif plate_format == "PAKISTAN":
+            clean_text = normalize_pakistan_plate_syntax(clean_text)
 
         if len(clean_text) < min_length:
             continue
@@ -278,8 +311,10 @@ def character_level_voting(
         char_confs.append(min(1.0, math.sqrt(winning_weight / max(1e-5, total_weight))))
 
     raw_consensus = "".join(consensus_chars)
-    if uk_syntax_correction and len(raw_consensus) == 7:
+    if plate_format == "UK" and uk_syntax_correction and len(raw_consensus) == 7:
         raw_consensus = normalize_uk_plate_syntax(raw_consensus)
+    elif plate_format == "PAKISTAN":
+        raw_consensus = normalize_pakistan_plate_syntax(raw_consensus)
 
     avg_confidence = float(np.mean(char_confs)) if char_confs else float(same_len_readings[0][1])
     return raw_consensus, avg_confidence
@@ -476,8 +511,10 @@ class VehicleTrackerManager:
             return
 
         clean_text = re.sub(r"[^A-Z0-9]", "", str(raw_text).strip().upper())
-        if self.config.uk_syntax_correction and len(clean_text) == 7:
+        if self.config.plate_format == "UK" and self.config.uk_syntax_correction and len(clean_text) == 7:
             clean_text = normalize_uk_plate_syntax(clean_text)
+        elif self.config.plate_format == "PAKISTAN":
+            clean_text = normalize_pakistan_plate_syntax(clean_text)
 
         if len(clean_text) < self.config.min_plate_length:
             return
@@ -505,8 +542,9 @@ class VehicleTrackerManager:
         consensus_result = character_level_voting(
             readings=track.plate_readings,
             min_length=self.config.min_plate_length,
-            regex_pattern=self.config.plate_regex_pattern,
+            regex_pattern=self.config.plate_regex_pattern if self.config.enforce_regex else None,
             uk_syntax_correction=self.config.uk_syntax_correction,
+            plate_format=self.config.plate_format,
         )
 
         if consensus_result is not None:
@@ -626,13 +664,33 @@ class VehicleTrackerManager:
 
         has_plate = track.best_plate_text is not None and track.best_plate_conf is not None
 
-        # Partial Plate Policy: Reject incomplete plate reads
+        # Partial Plate Policy: Reject incomplete or invalid plate reads
         if has_plate:
             plate_candidate = track.best_plate_text
-            uk_regex = re.compile(self.config.plate_regex_pattern)
-            is_valid_uk = bool(uk_regex.match(plate_candidate)) and len(plate_candidate) >= self.config.min_plate_length
+            is_valid = False
 
-            if not is_valid_uk:
+            if self.config.plate_format == "UK":
+                uk_regex = re.compile(self.config.plate_regex_pattern or r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$")
+                is_valid = bool(uk_regex.match(plate_candidate)) and len(plate_candidate) >= self.config.min_plate_length
+            elif self.config.plate_format == "PAKISTAN":
+                # Pakistani plates: 3 to 10 alphanumeric characters (e.g. ICT123, LEA185001, MNP123, FD1234)
+                has_letter = any(c.isalpha() for c in plate_candidate)
+                has_digit = any(c.isdigit() for c in plate_candidate)
+                is_valid = (
+                    len(plate_candidate) >= self.config.min_plate_length
+                    and len(plate_candidate) <= 10
+                    and (has_letter or has_digit)
+                )
+                if self.config.enforce_regex and self.config.plate_regex_pattern:
+                    pk_regex = re.compile(self.config.plate_regex_pattern)
+                    is_valid = is_valid and bool(pk_regex.match(plate_candidate))
+            else:  # GENERAL format
+                is_valid = len(plate_candidate) >= self.config.min_plate_length
+                if self.config.enforce_regex and self.config.plate_regex_pattern:
+                    gen_regex = re.compile(self.config.plate_regex_pattern)
+                    is_valid = is_valid and bool(gen_regex.match(plate_candidate))
+
+            if not is_valid:
                 if self.config.partial_plate_policy == "drop":
                     has_plate = False
                     track.best_plate_text = None

@@ -186,8 +186,14 @@ class VehicleALPRPipeline:
         """
         self.initialize_models()
 
-        if isinstance(video_source, int) or (isinstance(video_source, str) and video_source.isdigit()):
+        src_str = str(video_source)
+        if isinstance(video_source, int) or src_str.isdigit():
             cap = cv2.VideoCapture(int(video_source))
+        elif src_str.startswith(("rtsp://", "http://", "https://", "rtsps://")):
+            print(f"[INPUT] Connecting to live network stream: {src_str}")
+            # Set RTSP transport buffer options if available
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            cap = cv2.VideoCapture(src_str, cv2.CAP_FFMPEG)
         else:
             video_path = Path(video_source)
             if not video_path.exists():
@@ -349,23 +355,42 @@ class VehicleALPRPipeline:
                                 if t.smoothed_box is None:
                                     continue
                                 x1, y1, x2, y2 = [int(v) for v in t.smoothed_box]
-                                # Small 5% padding around vehicle crop
-                                pad_x = int((x2 - x1) * 0.05)
-                                pad_y = int((y2 - y1) * 0.05)
+                                # 8% padding around vehicle crop to ensure bumper/plate is never clipped
+                                pad_x = int((x2 - x1) * 0.08)
+                                pad_y = int((y2 - y1) * 0.08)
                                 cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
                                 cx2, cy2 = min(w_f, x2 + pad_x), min(h_f, y2 + pad_y)
 
-                                if (cx2 - cx1) < 40 or (cy2 - cy1) < 30:
+                                crop_w = cx2 - cx1
+                                crop_h = cy2 - cy1
+                                if crop_w < 50 or crop_h < 40:
                                     continue
 
                                 v_crop = frame[cy1:cy2, cx1:cx2]
-                                crop_alpr_res = self.alpr.predict(v_crop)
+
+                                # Upscale smaller vehicle crops to >= 384px width so FastALPR detector & OCR achieve peak clarity
+                                scale_factor = 1.0
+                                if crop_w < 384:
+                                    scale_factor = 384.0 / float(crop_w)
+                                    target_w = 384
+                                    target_h = max(64, int(crop_h * scale_factor))
+                                    v_crop_scaled = cv2.resize(v_crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+                                else:
+                                    v_crop_scaled = v_crop
+
+                                crop_alpr_res = self.alpr.predict(v_crop_scaled)
 
                                 for item in crop_alpr_res:
                                     if item.ocr and item.ocr.text:
                                         p_box = item.detection.bounding_box
-                                        px1, py1 = max(0, int(p_box.x1)), max(0, int(p_box.y1))
-                                        px2, py2 = min(v_crop.shape[1], int(p_box.x2)), min(v_crop.shape[0], int(p_box.y2))
+                                        # Rescale plate bounding box back to unscaled v_crop coordinates
+                                        spx1 = int(p_box.x1 / scale_factor)
+                                        spy1 = int(p_box.y1 / scale_factor)
+                                        spx2 = int(p_box.x2 / scale_factor)
+                                        spy2 = int(p_box.y2 / scale_factor)
+
+                                        px1, py1 = max(0, spx1), max(0, spy1)
+                                        px2, py2 = min(v_crop.shape[1], spx2), min(v_crop.shape[0], spy2)
                                         plate_crop = v_crop[py1:py2, px1:px2].copy()
 
                                         ocr_conf = (

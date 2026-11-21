@@ -1,36 +1,60 @@
 """
-CLI Entry point to run Vehicle ALPR Tracking Pipeline (Phase 1 Enterprise).
-Example:
-    python run.py --source stream.mp4 --output-video output/annotated_output.mp4
+CLI Entry point to run Vehicle ALPR Tracking Pipeline (Enterprise Multi-Camera & Single Video Ready).
+Examples:
+    # Single offline video (default fallback):
+    python run.py --source stream.mp4
+
+    # Run with 40-camera configuration from cameras.json:
+    python run.py --cameras-config cameras.json --camera-id CAM-00001
+
+    # Run specific camera config tested on an offline video clip:
+    python run.py --cameras-config cameras.json --camera-id CAM-00001 --source stream.mp4
 """
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
-from config import PipelineConfig
+from config import PipelineConfig, load_camera_from_json
 from pipeline import VehicleALPRPipeline
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Vehicle ALPR Single-Detection Pipeline (Phase 1 Enterprise)")
+    parser = argparse.ArgumentParser(
+        description="Vehicle ALPR Single-Detection Pipeline (Enterprise Safe City Ready)"
+    )
     parser.add_argument(
         "--source",
         type=str,
-        required=True,
-        help="Path to input video file (e.g. stream.mp4), RTSP stream, or camera index (e.g. 0).",
+        default=None,
+        help="Path to input video file (e.g. stream.mp4), RTSP stream, or camera index. If omitted, uses camera RTSP from cameras.json.",
+    )
+    parser.add_argument(
+        "--cameras-config",
+        type=str,
+        default=None,
+        help="Optional path to cameras.json containing 40-camera definitions.",
+    )
+    parser.add_argument(
+        "--camera-id",
+        type=str,
+        default="CAM-00001",
+        help="Camera ID string for event logging (e.g. CAM-00001). Default: CAM-00001.",
+    )
+    parser.add_argument(
+        "--plate-format",
+        type=str,
+        choices=["PAKISTAN", "GENERAL", "UK"],
+        default="PAKISTAN",
+        help="License plate format standard (default: PAKISTAN).",
     )
     parser.add_argument(
         "--output-video",
         type=str,
         default="output/annotated_output.mp4",
         help="Path where annotated output video will be saved.",
-    )
-    parser.add_argument(
-        "--camera-id",
-        type=str,
-        default="CAM-00001",
-        help="Camera ID string for event logging (e.g. CAM-00001).",
     )
     parser.add_argument(
         "--vehicle-conf",
@@ -120,14 +144,8 @@ def parse_args():
     parser.add_argument(
         "--uk-syntax",
         action="store_true",
-        default=True,
+        default=False,
         help="Enable UK plate syntax normalization (e.g. resolve 0/O, 1/I, 8/B).",
-    )
-    parser.add_argument(
-        "--no-uk-syntax",
-        dest="uk_syntax",
-        action="store_false",
-        help="Disable UK syntax normalization.",
     )
     parser.add_argument(
         "--print-events",
@@ -166,8 +184,10 @@ def main():
         except Exception as e:
             print(f"[CONFIG WARNING] Could not parse --roi JSON: {e}")
 
+    # 1. Base Configuration
     config = PipelineConfig(
         camera_id=args.camera_id,
+        plate_format=args.plate_format,
         vehicle_conf_thresh=args.vehicle_conf,
         alpr_frame_interval=args.alpr_interval,
         alpr_on_crops=args.alpr_on_crops,
@@ -185,12 +205,48 @@ def main():
         roi_polygon=roi_poly,
     )
 
+    # 2. Check for cameras.json override if provided
+    video_source = args.source
+    if args.cameras_config:
+        config = load_camera_from_json(
+            json_path=args.cameras_config,
+            camera_id=args.camera_id,
+            base_config=config,
+        )
+        if not video_source:
+            video_source = config.rtsp_url
+            print(f"[INPUT] Using RTSP URL from cameras.json for {config.camera_id}: {video_source}")
+
+    # 3. Fallback logic if video_source is still None
+    if not video_source:
+        # Check if default stream.mp4 exists in current working directory
+        if Path("stream.mp4").exists():
+            video_source = "stream.mp4"
+            print(f"[INPUT] No source specified. Automatically defaulted to local video: {video_source}")
+        else:
+            print("[ERROR] No input video source provided!")
+            print("Usage Examples:")
+            print("  1. Custom offline video:     python run.py --source stream.mp4")
+            print("  2. Multi-camera RTSP stream: python run.py --cameras-config cameras.json --camera-id CAM-00001")
+            sys.exit(1)
+
+    print(f"[SYSTEM] Pipeline ready for Camera: {config.camera_id} | Format: {config.plate_format}")
+    if config.camera_location:
+        print(f"[LOCATION] {config.camera_name} - {config.camera_location}")
+
     pipeline = VehicleALPRPipeline(config=config)
-    pipeline.process_video(
-        video_source=args.source,
-        output_video_path=args.output_video,
-        max_frames=args.max_frames,
-    )
+    try:
+        pipeline.process_video(
+            video_source=video_source,
+            output_video_path=args.output_video,
+            max_frames=args.max_frames,
+        )
+    except KeyboardInterrupt:
+        print("\n[INFO] User interrupted pipeline. Finalizing and saving outputs...")
+    except Exception as e:
+        print(f"[FATAL ERROR] Pipeline crashed with error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
