@@ -1,7 +1,7 @@
 """
-CLI Entry point to run Vehicle ALPR Tracking Pipeline (Phase 1).
+CLI Entry point to run Vehicle ALPR Tracking Pipeline (Phase 1 Enterprise).
 Example:
-    python run.py --source input_video.mp4 --output-video output/annotated.mp4
+    python run.py --source stream.mp4 --output-video output/annotated_output.mp4
 """
 
 import argparse
@@ -13,7 +13,7 @@ from pipeline import VehicleALPRPipeline
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Vehicle ALPR Single-Detection Pipeline (Phase 1)")
+    parser = argparse.ArgumentParser(description="Vehicle ALPR Single-Detection Pipeline (Phase 1 Enterprise)")
     parser.add_argument(
         "--source",
         type=str,
@@ -41,14 +41,14 @@ def parse_args():
     parser.add_argument(
         "--alpr-interval",
         type=int,
-        default=2,
-        help="Run ALPR every K frames to optimize compute (default: 2).",
+        default=3,
+        help="Run ALPR every K frames to optimize compute (default: 3).",
     )
     parser.add_argument(
         "--min-track-frames",
         type=int,
-        default=5,
-        help="Minimum frames a vehicle must be tracked before emitting event (default: 5).",
+        default=6,
+        help="Minimum frames a vehicle must be tracked before emitting event (default: 6).",
     )
     parser.add_argument(
         "--disappeared-frames",
@@ -59,8 +59,15 @@ def parse_args():
     parser.add_argument(
         "--min-area",
         type=float,
-        default=8000.0,
-        help="Minimum vehicle box area to be considered readable (default: 8000).",
+        default=10000.0,
+        help="Minimum vehicle box area to be considered readable (default: 10000).",
+    )
+    parser.add_argument(
+        "--partial-plate-policy",
+        type=str,
+        choices=["drop", "keep_low_conf"],
+        default="drop",
+        help="Policy for incomplete plate reads ('drop' marks as without-plate, 'keep_low_conf' keeps with low conf).",
     )
     parser.add_argument(
         "--preview",
@@ -89,14 +96,8 @@ def parse_args():
     parser.add_argument(
         "--sync-realtime",
         action="store_true",
-        default=True,
-        help="Synchronize playback to real wall-clock time (default: enabled).",
-    )
-    parser.add_argument(
-        "--no-sync-realtime",
-        dest="sync_realtime",
-        action="store_false",
-        help="Process video as fast as possible without real-time pacing.",
+        default=False,
+        help="Synchronize playback to real wall-clock time (default: False for max FPS).",
     )
     parser.add_argument(
         "--enforce-regex",
@@ -142,6 +143,7 @@ def main():
         min_track_frames=args.min_track_frames,
         max_disappeared_frames=args.disappeared_frames,
         min_readable_vehicle_area=args.min_area,
+        partial_plate_policy=args.partial_plate_policy,
         show_preview=args.preview,
         save_video=args.save_video,
         sync_realtime=args.sync_realtime,

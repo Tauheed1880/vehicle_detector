@@ -1,18 +1,21 @@
 """
 Track state management, box deduplication, plate voting, and single-event emission.
-Phase 1 Enhancements:
-1. Global Unique Track IDs: {camera_id}:{track_id}.
-2. Class-agnostic NMS and Nested / Containment box suppression.
-3. Readable Zone (ROI) & Distance Gate (Far-away horizon vehicles are completely ignored).
-4. Incomplete plate filter (length + regex) and character-level confidence-weighted voting.
-5. Fuzzy duplicate suppression (Levenshtein distance <= 2 within 60s).
-6. Configurable 'remarks' field (default off as requested).
+Phase 1 Enterprise Enhancements:
+1. Spatial Jump & ID Switch Guard: Prevents plate text bleed (e.g. ID 19 WW0577K -> FJ14ZHY).
+2. Strict Readable Zone Gate: Horizon/small cars outside readable zone are dropped (filtered_as_too_small).
+3. Partial Plate Policy ("drop"): Rejects incomplete reads like HNI4, 60WNA, K64DMV.
+4. End of video flush guard: Discards unverified tracks at stream end.
+5. Async Snapshot Saver: Background thread queue for zero-latency snapshot writes.
+6. Consensus Character Voting & Fuzzy Duplicate Suppression.
 """
 
 import json
+import math
+import queue
 import random
 import re
 import string
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +26,38 @@ import cv2
 import numpy as np
 
 from config import PipelineConfig
+
+
+class AsyncSnapshotSaver:
+    """Non-blocking background worker for saving full-frame and plate snapshots to disk."""
+
+    def __init__(self):
+        self.queue: queue.Queue = queue.Queue()
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def submit(self, path: Path, image: np.ndarray) -> None:
+        if self.running and image is not None and image.size > 0:
+            self.queue.put((str(path), image))
+
+    def _worker(self) -> None:
+        while self.running or not self.queue.empty():
+            try:
+                item = self.queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            path_str, img = item
+            try:
+                cv2.imwrite(path_str, img)
+            except Exception as e:
+                print(f"[SNAPSHOT SAVE ERROR] Could not save {path_str}: {e}")
+            finally:
+                self.queue.task_done()
+
+    def stop(self) -> None:
+        self.running = False
+        self.queue.join()  # Wait for all queued images to finish writing
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:
@@ -82,10 +117,10 @@ def get_image_sharpness(img: Optional[np.ndarray]) -> float:
 def filter_nested_boxes(
     boxes: List[List[float]],
     scores: List[float],
-    containment_thresh: float = 0.75,
+    containment_thresh: float = 0.70,
 ) -> Tuple[List[List[float]], List[float]]:
     """
-    Suppresses duplicate / nested bounding boxes where one box is almost entirely
+    Suppresses duplicate / nested bounding boxes where one box is substantially
     contained within another (e.g. car detected twice or sub-part detected as separate box).
     """
     if len(boxes) <= 1:
@@ -116,13 +151,11 @@ def filter_nested_boxes(
             iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
             intersection = iw * ih
 
-            # Check if Box A is substantially inside Box B
             containment_a = intersection / area_a
             containment_b = intersection / area_b
 
             if containment_a >= containment_thresh or containment_b >= containment_thresh:
-                # If one is inside the other, keep the one with higher confidence score
-                # or larger area if scores are very close
+                # Keep the one with higher score or larger area
                 if scores[i] < scores[j]:
                     keep_indices.discard(i)
                     break
@@ -136,13 +169,12 @@ def filter_nested_boxes(
 
 def character_level_voting(
     readings: List[Tuple[str, float]],
-    min_length: int = 4,
+    min_length: int = 7,
     regex_pattern: Optional[str] = None,
-    enforce_regex: bool = False,
 ) -> Optional[Tuple[str, float]]:
     """
     Performs character-level confidence-weighted frequency voting across multiple plate readings.
-    Filters out flickering/incomplete reads (like 'DMV' or 'HNI4') and finds true consensus.
+    Filters out flickering/incomplete reads (like 'DMV', 'HNI4', '60WNA') and finds true consensus.
     """
     if not readings:
         return None
@@ -154,18 +186,12 @@ def character_level_voting(
         clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
         if len(clean_text) < min_length:
             continue
-        if enforce_regex and regex and not regex.match(clean_text):
+        if regex and not regex.match(clean_text):
             continue
         valid_readings.append((clean_text, conf))
 
     if not valid_readings:
-        # Fallback to longest available clean reading if strict filter leaves none
-        for text, conf in readings:
-            clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
-            if len(clean_text) >= 3:
-                valid_readings.append((clean_text, conf))
-        if not valid_readings:
-            return None
+        return None
 
     # Group by length to find the most frequent plate length
     length_votes = defaultdict(float)
@@ -175,7 +201,7 @@ def character_level_voting(
     best_len = max(length_votes.keys(), key=lambda l: length_votes[l])
     same_len_readings = [r for r in valid_readings if len(r[0]) == best_len]
 
-    # Character-level position-wise voting
+    # Position-wise confidence voting
     consensus_chars = []
     char_confs = []
 
@@ -185,11 +211,9 @@ def character_level_voting(
             char = text[pos]
             pos_votes[char] += conf
 
-        # Pick character with highest accumulated confidence
         best_char = max(pos_votes.keys(), key=lambda c: pos_votes[c])
         consensus_chars.append(best_char)
 
-        total_pos_weight = sum(pos_votes.values())
         winning_weight = pos_votes[best_char]
         char_confs.append(min(1.0, winning_weight / max(1e-5, len(same_len_readings))))
 
@@ -208,6 +232,8 @@ class TrackState:
     disappeared_count: int = 0
     # Smoothed bounding box [x1, y1, x2, y2]
     smoothed_box: Optional[List[float]] = None
+    # Previous box center for spatial jump tracking
+    last_center: Optional[Tuple[float, float]] = None
     # Best vehicle snapshot data
     best_vehicle_box: Optional[List[int]] = None
     best_full_frame: Optional[np.ndarray] = None
@@ -232,35 +258,39 @@ class VehicleTrackerManager:
         self.config = config
         self.tracks: Dict[int, TrackState] = {}
         self.emitted_events: List[dict] = []
-        # Set of track IDs that have ALREADY emitted an event (guarantees NO repeat JSON)
         self.emitted_track_ids: Set[int] = set()
         # Store emitted plate -> (timestamp, event_id) for fuzzy duplicate filtering
         self.recent_emitted_plates: Dict[str, Tuple[float, str]] = {}
         self.event_counter: int = 0
 
+        # Async background snapshot saver
+        self.snapshot_saver = AsyncSnapshotSaver()
+
         # Stats counters
         self.total_unique_vehicles: int = 0
         self.total_with_plate: int = 0
         self.total_without_plate: int = 0
+        self.total_filtered_too_small: int = 0
 
     def is_in_roi(self, box: List[float], frame_shape: Tuple[int, int]) -> bool:
         """
-        Determines if the vehicle box is inside the configured ROI polygon.
-        If roi_polygon is None, checks if box is within the lower 85% of frame (readable region).
+        Determines if the vehicle box is inside the readable zone.
+        Excludes the upper horizon (top 32% of frame) where vehicles are too far away.
         """
         h, w = frame_shape[:2]
         x1, y1, x2, y2 = box
         bottom_cx = (x1 + x2) / 2.0
         bottom_cy = y2
 
+        # If custom ROI polygon is defined, check polygon inclusion
         if self.config.roi_polygon is not None and len(self.config.roi_polygon) >= 3:
             pts = np.array(self.config.roi_polygon, dtype=np.int32)
             dist = cv2.pointPolygonTest(pts, (float(bottom_cx), float(bottom_cy)), measureDist=False)
             return dist >= 0
 
-        # Default: readable zone is any vehicle whose bottom is within 15% to 98% of the frame height
-        # and has minimum box dimensions (filters out extreme horizon)
-        return (0.15 * h <= bottom_cy <= 0.99 * h)
+        # Default: readable zone excludes the upper horizon cutoff and frame margins
+        horizon_y = self.config.roi_top_cutoff_ratio * h
+        return (bottom_cy >= horizon_y) and (y1 >= horizon_y * 0.7)
 
     def update_track(
         self,
@@ -271,7 +301,7 @@ class VehicleTrackerManager:
     ) -> TrackState:
         """
         Updates an existing track or initializes a new track state.
-        Enforces readable zone entry and box smoothing.
+        Detects spatial jumps (ID switches) and enforces the readable zone gate.
         """
         x1, y1, x2, y2 = [int(v) for v in box]
         h, w = frame.shape[:2]
@@ -279,6 +309,7 @@ class VehicleTrackerManager:
         x2, y2 = min(w, x2), min(h, y2)
         bw, bh = max(0, x2 - x1), max(0, y2 - y1)
         area = float(bw * bh)
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
         in_roi = self.is_in_roi([float(x1), float(y1), float(x2), float(y2)], (h, w))
         is_readable_size = (
@@ -305,6 +336,7 @@ class VehicleTrackerManager:
                 frames_tracked=1,
                 disappeared_count=0,
                 smoothed_box=[float(x1), float(y1), float(x2), float(y2)],
+                last_center=(cx, cy),
                 best_vehicle_box=[x1, y1, x2, y2],
                 best_full_frame=frame.copy() if area > 0 else None,
                 best_vehicle_crop=vehicle_crop,
@@ -314,6 +346,23 @@ class VehicleTrackerManager:
             self.tracks[track_id] = track
         else:
             track = self.tracks[track_id]
+
+            # -------------------------------------------------------------
+            # Spatial Jump Check: Detect ID switches / tracker teleportation
+            # -------------------------------------------------------------
+            if track.last_center is not None and track.frames_tracked > 2:
+                prev_cx, prev_cy = track.last_center
+                jump_dist = math.hypot(cx - prev_cx, cy - prev_cy)
+                if jump_dist > self.config.max_spatial_jump_px:
+                    # Tracker accidentally jumped to another vehicle!
+                    # Reset track history to prevent plate bleeding across vehicles
+                    track.plate_readings.clear()
+                    track.best_plate_text = None
+                    track.best_plate_conf = None
+                    track.plate_confident_reached = False
+                    track.best_vehicle_area = area
+
+            track.last_center = (cx, cy)
             track.last_frame_idx = frame_idx
             track.frames_tracked += 1
             track.disappeared_count = 0
@@ -343,7 +392,7 @@ class VehicleTrackerManager:
         return self.tracks[track_id]
 
     def mark_disappeared_tracks(self, active_track_ids: set[int]) -> None:
-        """Increments disappeared count for tracks that were not detected in current frame."""
+        """Increments disappeared count for tracks absent from current frame."""
         for t_id, track in self.tracks.items():
             if t_id not in active_track_ids:
                 track.disappeared_count += 1
@@ -356,7 +405,7 @@ class VehicleTrackerManager:
     ) -> None:
         """
         Matches full-frame ALPR plate detections to vehicle tracks.
-        Accumulates plate readings and performs character-level consensus voting.
+        Enforces plate mutability lock (prevents ID 19 plate jump) and consensus voting.
         """
         h, w = frame.shape[:2]
 
@@ -399,16 +448,27 @@ class VehicleTrackerManager:
                 )
                 plate_det_conf = float(det.confidence)
 
-                # Plate length check: filter out incomplete reads (like 'DMV', 'HNI4')
+                # Length check: reject short incomplete reads
                 if len(clean_text) < self.config.min_plate_length:
                     continue
+
+                # -------------------------------------------------------------
+                # Plate Mutability Lock (Prevents ID 19 Plate Jump):
+                # If a track already has a confident consensus plate (e.g. WW0577K),
+                # do NOT allow a completely different plate (e.g. FJ14ZHY) to overwrite it!
+                # -------------------------------------------------------------
+                if track.plate_confident_reached and track.best_plate_text:
+                    dist = levenshtein_distance(clean_text, track.best_plate_text)
+                    if dist > 3:
+                        # Conflicting plate detected on same track ID -> ID bleed! Reject overwrite.
+                        continue
 
                 # Crop plate image safely
                 c_px1, c_py1 = max(0, int(px1)), max(0, int(py1))
                 c_px2, c_py2 = min(w, int(px2)), min(h, int(py2))
                 plate_crop = frame[c_py1:c_py2, c_px1:c_px2].copy()
 
-                # Smart blur filter: check sharpness score
+                # Blur filter: check sharpness score
                 sharpness = get_image_sharpness(plate_crop)
                 if sharpness < self.config.min_plate_sharpness and track.best_plate_crop is not None:
                     continue
@@ -430,7 +490,6 @@ class VehicleTrackerManager:
                     readings=track.plate_readings,
                     min_length=self.config.min_plate_length,
                     regex_pattern=self.config.plate_regex_pattern,
-                    enforce_regex=self.config.enforce_regex,
                 )
 
                 if consensus_result is not None:
@@ -452,10 +511,9 @@ class VehicleTrackerManager:
     ) -> List[dict]:
         """
         Evaluates active and disappeared tracks.
-        Enforces STRICT single-event rule:
-          1. Far-away horizon vehicles that never entered readable zone are DROPPED (no count, no event).
-          2. Exactly 1 event per valid vehicle track.
-          3. Fuzzy duplicate suppression (Levenshtein distance <= 2 within 60s).
+        Enforces STRICT single-event rule and end-of-video flush guards:
+          1. Horizon vehicles that never entered readable zone are DROPPED (no count, no event).
+          2. End of video flush ONLY flushes tracks that satisfied min_track_frames AND entered_readable_zone.
         """
         emitted_now: List[dict] = []
         now_ts = datetime.now().timestamp()
@@ -465,20 +523,22 @@ class VehicleTrackerManager:
                 continue
 
             # -------------------------------------------------------------
-            # Distance / Zone Gate: Far-away small cars outside readable zone
-            # must be ignored completely (neither counted nor emitted).
+            # Distance / Zone Gate:
+            # Vehicles that never entered readable zone are DROPPED without event.
             # -------------------------------------------------------------
-            if not track.entered_readable_zone and track.best_plate_text is None:
+            if not track.entered_readable_zone:
                 if track.disappeared_count >= self.config.max_disappeared_frames or force_all:
+                    self.total_filtered_too_small += 1
                     del self.tracks[t_id]
                 continue
 
-            # Minimum track frames filter to eliminate false-positive flickers
+            # -------------------------------------------------------------
+            # Minimum Track Frames Filter:
+            # Drop tracks that were tracked for too few frames (filters false flickers)
+            # -------------------------------------------------------------
             if track.frames_tracked < self.config.min_track_frames:
-                if force_all:
-                    del self.tracks[t_id]
-                    continue
-                if track.disappeared_count >= self.config.max_disappeared_frames:
+                if force_all or (track.disappeared_count >= self.config.max_disappeared_frames):
+                    self.total_filtered_too_small += 1
                     del self.tracks[t_id]
                 continue
 
@@ -489,7 +549,11 @@ class VehicleTrackerManager:
                 should_emit = True
 
             # Condition 2: Vehicle exited the readable zone / frame
-            elif track.disappeared_count >= self.config.max_disappeared_frames or force_all:
+            elif track.disappeared_count >= self.config.max_disappeared_frames:
+                should_emit = True
+
+            # Condition 3: End of video flush (ONLY for tracks satisfying all criteria)
+            elif force_all and track.entered_readable_zone and track.frames_tracked >= self.config.min_track_frames:
                 should_emit = True
 
             if should_emit:
@@ -504,8 +568,8 @@ class VehicleTrackerManager:
 
     def _emit_event(self, track: TrackState, current_timestamp: float) -> Optional[dict]:
         """
-        Formats single event JSON and saves best frame snapshots.
-        Applies fuzzy duplicate suppression (Levenshtein distance <= 2 within 60s).
+        Formats single event JSON and saves best frame snapshots asynchronously.
+        Enforces PARTIAL_PLATE_POLICY ("drop" or "keep_low_conf").
         """
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
@@ -514,8 +578,27 @@ class VehicleTrackerManager:
         has_plate = track.best_plate_text is not None and track.best_plate_conf is not None
 
         # -------------------------------------------------------------
+        # Partial Plate Policy: Reject incomplete plate reads (HNI4, 60WNA, K64DMV)
+        # -------------------------------------------------------------
+        if has_plate:
+            plate_candidate = track.best_plate_text
+            uk_regex = re.compile(self.config.plate_regex_pattern)
+            is_valid_uk = bool(uk_regex.match(plate_candidate)) and len(plate_candidate) >= self.config.min_plate_length
+
+            if not is_valid_uk:
+                if self.config.partial_plate_policy == "drop":
+                    # Discard partial read completely -> mark as vehicle without number plate
+                    has_plate = False
+                    track.best_plate_text = None
+                    track.best_plate_conf = None
+                    track.best_plate_det_conf = None
+                    track.best_plate_crop = None
+                elif self.config.partial_plate_policy == "keep_low_conf":
+                    # Keep but demote confidence
+                    track.best_plate_conf = min(0.35, float(track.best_plate_conf or 0.35))
+
+        # -------------------------------------------------------------
         # Fuzzy Duplicate Suppression (Levenshtein distance <= 2 within 60s)
-        # Prevents ID churn from creating duplicate events for the same vehicle
         # -------------------------------------------------------------
         if has_plate:
             plate_candidate = track.best_plate_text
@@ -530,7 +613,6 @@ class VehicleTrackerManager:
                         )
                         return None
 
-            # Register plate in recent memory
             self.recent_emitted_plates[plate_candidate] = (current_timestamp, f"EVT_{self.event_counter + 1}")
 
         self.event_counter += 1
@@ -539,7 +621,7 @@ class VehicleTrackerManager:
             self.recent_emitted_plates[track.best_plate_text] = (current_timestamp, event_id)
 
         # -------------------------------------------------------------
-        # Snapshot Generation
+        # Asynchronous Snapshot Generation
         # Full-size context frame with highlight box ONLY on target vehicle
         # -------------------------------------------------------------
         vehicle_filename = f"vehicle_{event_id}.png"
@@ -584,20 +666,21 @@ class VehicleTrackerManager:
                 cv2.LINE_AA,
             )
 
-            cv2.imwrite(str(vehicle_save_path), full_frame_annotated)
-            track.best_full_frame = None  # Free memory immediately
+            # Submit to async snapshot queue (non-blocking)
+            self.snapshot_saver.submit(vehicle_save_path, full_frame_annotated)
+            track.best_full_frame = None  # Free RAM
         elif track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
-            cv2.imwrite(str(vehicle_save_path), track.best_vehicle_crop)
+            self.snapshot_saver.submit(vehicle_save_path, track.best_vehicle_crop)
         else:
             placeholder = np.zeros((100, 100, 3), dtype=np.uint8)
-            cv2.imwrite(str(vehicle_save_path), placeholder)
+            self.snapshot_saver.submit(vehicle_save_path, placeholder)
 
         # Plate cropped snapshot
         plate_filename: Optional[str] = None
         if has_plate and track.best_plate_crop is not None and track.best_plate_crop.size > 0:
             plate_filename = f"plate_{event_id}.png"
             plate_save_path = self.config.snapshots_dir / plate_filename
-            cv2.imwrite(str(plate_save_path), track.best_plate_crop)
+            self.snapshot_saver.submit(plate_save_path, track.best_plate_crop)
 
         # -------------------------------------------------------------
         # Exact JSON Event Output Schema
@@ -652,12 +735,13 @@ class VehicleTrackerManager:
         print(f"\n[EVENT RECORDED] {json.dumps(event_data, indent=2)}")
         return event_data
 
-    def get_counts(self) -> Tuple[int, int, int, int]:
-        """Returns (total_unique_vehicles, with_plate, without_plate, active_tracks)."""
+    def get_counts(self) -> Tuple[int, int, int, int, int]:
+        """Returns (total_unique, with_plate, without_plate, active, filtered_too_small)."""
         active_count = sum(1 for t in self.tracks.values() if t.disappeared_count == 0)
         return (
             self.total_unique_vehicles,
             self.total_with_plate,
             self.total_without_plate,
             active_count,
+            self.total_filtered_too_small,
         )
