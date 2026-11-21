@@ -69,6 +69,7 @@ class PipelineConfig:
     # UK Plate format regex: 2 letters, 2 digits, 3 letters (e.g. AB12CDE)
     plate_country_code: str = "UK"
     plate_regex_pattern: str = r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$"
+    enforce_regex: bool = False
     # Partial plate policy: "drop" (ignore incomplete reads) or "keep_low_conf"
     partial_plate_policy: str = "drop"
 
