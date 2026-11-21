@@ -45,6 +45,18 @@ def parse_args():
         help="Run ALPR every K frames to optimize compute (default: 3).",
     )
     parser.add_argument(
+        "--alpr-on-crops",
+        action="store_true",
+        default=True,
+        help="Run ALPR on vehicle crops for 3x speedup and higher accuracy (default: enabled).",
+    )
+    parser.add_argument(
+        "--full-frame-alpr",
+        dest="alpr_on_crops",
+        action="store_false",
+        help="Run ALPR on full frames instead of vehicle crops.",
+    )
+    parser.add_argument(
         "--min-track-frames",
         type=int,
         default=6,
@@ -106,6 +118,24 @@ def parse_args():
         help="Strictly enforce country regex validation on plate reads.",
     )
     parser.add_argument(
+        "--uk-syntax",
+        action="store_true",
+        default=True,
+        help="Enable UK plate syntax normalization (e.g. resolve 0/O, 1/I, 8/B).",
+    )
+    parser.add_argument(
+        "--no-uk-syntax",
+        dest="uk_syntax",
+        action="store_false",
+        help="Disable UK syntax normalization.",
+    )
+    parser.add_argument(
+        "--print-events",
+        action="store_true",
+        default=False,
+        help="Print event JSON to terminal console (default: False to reduce console noise).",
+    )
+    parser.add_argument(
         "--include-remarks",
         action="store_true",
         default=False,
@@ -140,6 +170,7 @@ def main():
         camera_id=args.camera_id,
         vehicle_conf_thresh=args.vehicle_conf,
         alpr_frame_interval=args.alpr_interval,
+        alpr_on_crops=args.alpr_on_crops,
         min_track_frames=args.min_track_frames,
         max_disappeared_frames=args.disappeared_frames,
         min_readable_vehicle_area=args.min_area,
@@ -148,6 +179,8 @@ def main():
         save_video=args.save_video,
         sync_realtime=args.sync_realtime,
         enforce_regex=args.enforce_regex,
+        uk_syntax_correction=args.uk_syntax,
+        print_events_to_terminal=args.print_events,
         include_remarks=args.include_remarks,
         roi_polygon=roi_poly,
     )

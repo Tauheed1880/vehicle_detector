@@ -1,5 +1,5 @@
 """
-Configuration settings for Vehicle Tracking and FastALPR Pipeline (Phase 1 & Phase 2).
+Configuration settings for Vehicle Tracking and FastALPR Pipeline (Phase 1 & Phase 2 Ready).
 All thresholds, paths, model names, ROI polygons, and performance settings are defined here.
 """
 
@@ -62,6 +62,9 @@ class PipelineConfig:
     # ALPR frame interval: Run ALPR every 3 frames on unresolved readable vehicles
     alpr_frame_interval: int = 3
 
+    # ALPR Mode: Run on vehicle crops (much faster) vs full frame
+    alpr_on_crops: bool = True
+
     # Plate Quality & UK Standard Rules
     min_plate_length: int = 7             # UK current standard is exactly 7 characters
     min_plate_sharpness: float = 30.0
@@ -70,6 +73,8 @@ class PipelineConfig:
     plate_country_code: str = "UK"
     plate_regex_pattern: str = r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$"
     enforce_regex: bool = False
+    # UK Syntax Correction: enforce letters at positions 0,1,4,5,6 and digits at 2,3
+    uk_syntax_correction: bool = True
     # Partial plate policy: "drop" (ignore incomplete reads) or "keep_low_conf"
     partial_plate_policy: str = "drop"
 
@@ -83,6 +88,13 @@ class PipelineConfig:
     fuzzy_plate_max_distance: int = 2         # Max Levenshtein distance for duplicate matching
     box_smoothing_factor: float = 0.65        # EMA box smoothing
     include_remarks: bool = False             # Set True only if remarks field is requested
+    print_events_to_terminal: bool = False    # Set True to print event JSON on console
+
+    # -------------------------------------------------------------
+    # Stage 2 (Downstream Analyzer) Interface Setup
+    # -------------------------------------------------------------
+    enable_stage2_interface: bool = True
+    stage2_queue_maxsize: int = 1000
 
     # -------------------------------------------------------------
     # Real-Time Colab Preview & Performance
