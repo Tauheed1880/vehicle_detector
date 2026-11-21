@@ -1,6 +1,6 @@
 """
 Configuration settings for Vehicle Tracking and FastALPR Pipeline.
-All thresholds, paths, model names and timing parameters are defined here.
+All thresholds, paths, model names, smart frame gating, and timing parameters are defined here.
 """
 
 from dataclasses import dataclass, field
@@ -35,8 +35,18 @@ class PipelineConfig:
     alpr_detector_model: str = "yolo-v9-t-384-license-plate-end2end"
     alpr_detector_conf_thresh: float = 0.35
     alpr_ocr_model: str = "cct-xs-v2-global-model"
-    # ALPR frame interval: Run ALPR every K frames to save CPU/RAM
+    # ALPR frame interval: Run ALPR every K frames to save compute
     alpr_frame_interval: int = 2
+
+    # -------------------------------------------------------------
+    # Adaptive Smart Frame & Quality Gating (Enterprise Optimization)
+    # -------------------------------------------------------------
+    enable_smart_gating: bool = True
+    # Minimum vehicle bounding box area (in pixels^2) before triggering ALPR
+    # Filters out far-away vehicles at the horizon where plates are unreadable (< 80x80px)
+    min_vehicle_area_for_alpr: float = 6400.0
+    # Minimum sharpness score (Laplacian variance) to reject motion-blurred plates
+    min_plate_sharpness: float = 35.0
 
     # -------------------------------------------------------------
     # Single Detection & Event Emission Rules (STRICT)

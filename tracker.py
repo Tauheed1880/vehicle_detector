@@ -44,6 +44,14 @@ def get_camera_number(camera_id_str: str) -> str:
     return "1"
 
 
+def get_image_sharpness(img: Optional[np.ndarray]) -> float:
+    """Calculates image sharpness score using Laplacian variance (higher is sharper)."""
+    if img is None or img.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 def generate_infinite_event_id(counter: int, camera_id_str: str, now: datetime) -> str:
     """
     Generates unique event ID formatted as:
@@ -222,6 +230,13 @@ class VehicleTrackerManager:
                 c_px1, c_py1 = max(0, int(px1)), max(0, int(py1))
                 c_px2, c_py2 = min(w, int(px2)), min(h, int(py2))
                 plate_crop = frame[c_py1:c_py2, c_px1:c_px2].copy()
+
+                # Smart blur filter: Check sharpness of plate patch
+                sharpness = get_image_sharpness(plate_crop)
+                if self.config.enable_smart_gating and track.best_plate_crop is not None:
+                    # If new plate is blurry and doesn't beat previous OCR confidence, reject
+                    if sharpness < self.config.min_plate_sharpness and ocr_conf <= (track.best_plate_conf or 0.0):
+                        continue
 
                 # Crop vehicle image at this exact frame
                 if track.smoothed_box is not None:

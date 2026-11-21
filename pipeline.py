@@ -168,13 +168,20 @@ class VehicleALPRPipeline:
                 self.tracker_manager.mark_disappeared_tracks(active_track_ids)
 
                 # 2. Run FastALPR on full frame periodically
-                # CPU optimization: Only run ALPR if there are active tracks still missing confident plate readings
+                # Adaptive Smart Frame Gating:
+                # Run ALPR only if vehicles are missing confident readings AND are within the readable focal zone
                 needs_alpr = False
                 for t_id in active_track_ids:
                     t = self.tracker_manager.tracks.get(t_id)
                     if t and not t.plate_confident_reached:
-                        needs_alpr = True
-                        break
+                        if self.config.enable_smart_gating:
+                            # Sweet-spot distance gate
+                            if t.best_vehicle_area >= self.config.min_vehicle_area_for_alpr:
+                                needs_alpr = True
+                                break
+                        else:
+                            needs_alpr = True
+                            break
 
                 if needs_alpr and (frame_idx % self.config.alpr_frame_interval == 0):
                     alpr_predictions = self.alpr.predict(frame)
