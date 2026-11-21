@@ -64,7 +64,14 @@ def parse_args():
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Display live GUI window with cv2.imshow (do not use in headless Colab).",
+        default=True,
+        help="Display live GUI window with realtime tracking (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-show",
+        dest="show",
+        action="store_false",
+        help="Disable live GUI display (headless mode).",
     )
     parser.add_argument(
         "--max-frames",

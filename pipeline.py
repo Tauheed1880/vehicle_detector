@@ -176,10 +176,18 @@ class VehicleALPRPipeline:
                     writer.write(annotated_frame)
 
                 if show_display:
-                    cv2.imshow("FastALPR Vehicle Tracking", annotated_frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        print("[USER] Quitting visualization.")
-                        break
+                    try:
+                        cv2.imshow("FastALPR Vehicle Tracking", annotated_frame)
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                            print("[USER] Quitting visualization.")
+                            break
+                    except Exception as e:
+                        if not hasattr(self, "_display_warning_shown"):
+                            print(
+                                f"\n[NOTICE] GUI window cannot be opened directly in this headless environment ({e}).\n"
+                                f"Annotated video with all tracking boxes & HUD is being saved to: {output_video_path or 'output/'}\n"
+                            )
+                            self._display_warning_shown = True
 
                 if frame_idx % 30 == 0 or frame_idx == 1:
                     u, p, np_cnt, act = self.tracker_manager.get_counts()
