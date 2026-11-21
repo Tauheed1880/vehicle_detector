@@ -1,0 +1,23 @@
+# ==============================================================================
+# FastALPR with Vehicle Detection & Tracking Dependencies
+# Cross-platform: Linux (Colab) & Windows
+# ==============================================================================
+
+# Core FastALPR OCR and Plate Detection
+fast-plate-ocr>=1.1.0
+open-image-models>=0.5.1
+opencv-python-headless>=4.9.0.80
+
+# Vehicle Detector & Tracker
+# NOTE: Ultralytics is licensed under GNU AGPL-3.0.
+ultralytics>=8.3.0
+
+# Numerical, Image, and Config utilities
+numpy>=1.24.0,<2.0.0
+PyYAML>=6.0.1
+Pillow>=10.0.0
+
+# ONNX Runtime backend:
+# In Colab/Linux with GPU: run 'pip install onnxruntime-gpu'
+# On CPU-only environments: run 'pip install onnxruntime'
+# (Automated in install.sh and install.bat)

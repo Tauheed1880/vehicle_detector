@@ -1,0 +1,339 @@
+"""
+Track state management, plate-to-vehicle association, and single-event emission.
+Guarantees:
+1. Exactly ONE event per vehicle track ID.
+2. Best frame snapshot (largest vehicle box + clearest plate).
+3. Filtering false positives (min_track_frames).
+4. Duplicate plate suppression within a time window (handles ID switching).
+"""
+
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+from config import PipelineConfig
+
+
+@dataclass
+class TrackState:
+    track_id: int
+    first_frame_idx: int
+    last_frame_idx: int
+    frames_tracked: int = 1
+    disappeared_count: int = 0
+    # Smoothed bounding box [x1, y1, x2, y2]
+    smoothed_box: Optional[List[float]] = None
+    # Best vehicle snapshot data
+    best_vehicle_box: Optional[List[int]] = None
+    best_vehicle_crop: Optional[np.ndarray] = None
+    best_vehicle_area: float = 0.0
+    # Best plate snapshot & OCR data
+    best_plate_crop: Optional[np.ndarray] = None
+    best_plate_text: Optional[str] = None
+    best_plate_conf: Optional[float] = None
+    best_plate_det_conf: Optional[float] = None
+    # Lifecycle flags
+    has_event_emitted: bool = False
+    plate_confident_reached: bool = False
+
+
+class VehicleTrackerManager:
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.tracks: Dict[int, TrackState] = {}
+        self.emitted_events: List[dict] = []
+        # Store emitted plate -> timestamp (epoch seconds) for duplicate filtering
+        self.recent_emitted_plates: Dict[str, float] = {}
+        self.event_counter: int = 0
+
+        # Stats counters
+        self.total_unique_vehicles: int = 0
+        self.total_with_plate: int = 0
+        self.total_without_plate: int = 0
+
+    def update_track(
+        self,
+        track_id: int,
+        box: List[float],
+        frame: np.ndarray,
+        frame_idx: int,
+    ) -> TrackState:
+        """
+        Updates an existing track or creates a new track state with box smoothing.
+        """
+        x1, y1, x2, y2 = [int(v) for v in box]
+        h, w = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        area = float((x2 - x1) * (y2 - y1))
+
+        if track_id not in self.tracks:
+            # Initialize new track
+            track = TrackState(
+                track_id=track_id,
+                first_frame_idx=frame_idx,
+                last_frame_idx=frame_idx,
+                frames_tracked=1,
+                disappeared_count=0,
+                smoothed_box=[float(x1), float(y1), float(x2), float(y2)],
+                best_vehicle_box=[x1, y1, x2, y2],
+                best_vehicle_crop=frame[y1:y2, x1:x2].copy() if area > 0 else None,
+                best_vehicle_area=area,
+            )
+            self.tracks[track_id] = track
+        else:
+            track = self.tracks[track_id]
+            track.last_frame_idx = frame_idx
+            track.frames_tracked += 1
+            track.disappeared_count = 0
+
+            # Exponential Moving Average (EMA) smoothing to eliminate bounding box jitter
+            alpha = self.config.box_smoothing_factor
+            if track.smoothed_box is not None:
+                track.smoothed_box = [
+                    alpha * float(c) + (1.0 - alpha) * float(s)
+                    for c, s in zip([x1, y1, x2, y2], track.smoothed_box)
+                ]
+            else:
+                track.smoothed_box = [float(x1), float(y1), float(x2), float(y2)]
+
+            # If vehicle area is larger and plate not locked yet, update best vehicle snapshot
+            if area > track.best_vehicle_area and area > 0:
+                track.best_vehicle_area = area
+                track.best_vehicle_box = [x1, y1, x2, y2]
+                # Only keep crop if event has not been emitted yet
+                if not track.has_event_emitted:
+                    track.best_vehicle_crop = frame[y1:y2, x1:x2].copy()
+
+        return self.tracks[track_id]
+
+    def mark_disappeared_tracks(self, active_track_ids: set[int]) -> None:
+        """
+        Increments disappeared count for tracks that were not detected in current frame.
+        """
+        for t_id, track in self.tracks.items():
+            if t_id not in active_track_ids:
+                track.disappeared_count += 1
+
+    def match_and_update_plates(
+        self,
+        alpr_results: list,
+        frame: np.ndarray,
+        frame_idx: int,
+    ) -> None:
+        """
+        Matches full-frame ALPR plate detections to vehicles by checking if plate center
+        is inside vehicle bounding box. Updates track with the best OCR confidence reading.
+        """
+        h, w = frame.shape[:2]
+
+        for alpr_res in alpr_results:
+            det = alpr_res.detection
+            ocr = alpr_res.ocr
+            if ocr is None or not ocr.text:
+                continue
+
+            # Compute plate center
+            bbox = det.bounding_box
+            px1, py1, px2, py2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
+            pcx = (px1 + px2) / 2.0
+            pcy = (py1 + py2) / 2.0
+
+            # Find matching vehicle track
+            best_match_id: Optional[int] = None
+            smallest_enclosing_area = float("inf")
+
+            for t_id, track in self.tracks.items():
+                if track.disappeared_count > 0 or track.smoothed_box is None:
+                    continue
+                vx1, vy1, vx2, vy2 = track.smoothed_box
+                # Check if plate center is inside vehicle box
+                if vx1 <= pcx <= vx2 and vy1 <= pcy <= vy2:
+                    v_area = (vx2 - vx1) * (vy2 - vy1)
+                    if v_area < smallest_enclosing_area:
+                        smallest_enclosing_area = v_area
+                        best_match_id = t_id
+
+            if best_match_id is not None:
+                track = self.tracks[best_match_id]
+                ocr_conf = (
+                    float(np.mean(ocr.confidence))
+                    if isinstance(ocr.confidence, (list, tuple, np.ndarray))
+                    else float(ocr.confidence)
+                )
+                plate_det_conf = float(det.confidence)
+
+                # Crop plate image safely
+                c_px1, c_py1 = max(0, int(px1)), max(0, int(py1))
+                c_px2, c_py2 = min(w, int(px2)), min(h, int(py2))
+                plate_crop = frame[c_py1:c_py2, c_px1:c_px2].copy()
+
+                # Crop vehicle image at this exact frame
+                if track.smoothed_box is not None:
+                    c_vx1, c_vy1 = max(0, int(track.smoothed_box[0])), max(0, int(track.smoothed_box[1]))
+                    c_vx2, c_vy2 = min(w, int(track.smoothed_box[2])), min(h, int(track.smoothed_box[3]))
+                    vehicle_crop = frame[c_vy1:c_vy2, c_vx1:c_vx2].copy()
+                else:
+                    vehicle_crop = None
+
+                # Keep reading with highest OCR confidence
+                is_better = (track.best_plate_conf is None) or (ocr_conf > track.best_plate_conf)
+                if is_better:
+                    track.best_plate_text = str(ocr.text).strip().upper()
+                    track.best_plate_conf = ocr_conf
+                    track.best_plate_det_conf = plate_det_conf
+                    track.best_plate_crop = plate_crop
+                    if vehicle_crop is not None and vehicle_crop.size > 0:
+                        track.best_vehicle_crop = vehicle_crop
+
+                    # Check if confident plate threshold reached
+                    if ocr_conf >= self.config.min_confident_plate_conf:
+                        track.plate_confident_reached = True
+
+    def check_and_emit_events(
+        self,
+        current_frame_idx: int,
+        force_all: bool = False,
+    ) -> List[dict]:
+        """
+        Evaluates active and disappeared tracks.
+        Enforces STRICT single-event rule:
+          - Emit when:
+            a) Tracked >= min_track_frames AND
+            b) Either confident plate found OR track disappeared for max_disappeared_frames (or force_all at stream end).
+          - If never found plate: emits as vehicle without number plate (null fields).
+        """
+        emitted_now: List[dict] = []
+        now_ts = datetime.now().timestamp()
+
+        for t_id, track in list(self.tracks.items()):
+            if track.has_event_emitted:
+                continue
+
+            # Must satisfy minimum track frames to filter false positives
+            if track.frames_tracked < self.config.min_track_frames:
+                # If stream ended and didn't reach min frames, discard
+                if force_all:
+                    continue
+                # If disappeared before reaching min frames, delete track
+                if track.disappeared_count >= self.config.max_disappeared_frames:
+                    del self.tracks[t_id]
+                continue
+
+            should_emit = False
+
+            # Condition 1: Confident plate identified
+            if track.plate_confident_reached and track.best_plate_text:
+                should_emit = True
+
+            # Condition 2: Vehicle exited the frame (disappeared for N frames) or stream finished
+            elif track.disappeared_count >= self.config.max_disappeared_frames or force_all:
+                should_emit = True
+
+            if should_emit:
+                event = self._emit_event(track, now_ts)
+                if event is not None:
+                    emitted_now.append(event)
+                track.has_event_emitted = True
+
+        return emitted_now
+
+    def _emit_event(self, track: TrackState, current_timestamp: float) -> Optional[dict]:
+        """
+        Formats and persists single event JSON and snapshots.
+        """
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        # Duplicate suppression: If same plate text was emitted recently under another track ID, skip
+        has_plate = track.best_plate_text is not None and track.best_plate_conf is not None
+        if has_plate:
+            plate_key = track.best_plate_text
+            last_seen = self.recent_emitted_plates.get(plate_key)
+            if last_seen is not None:
+                if (current_timestamp - last_seen) < self.config.duplicate_plate_window_sec:
+                    # Duplicate detected within time window - suppress new event
+                    print(
+                        f"[DUPLICATE SUPPRESSED] Plate '{plate_key}' was emitted within "
+                        f"{self.config.duplicate_plate_window_sec}s for another track ID. Skipping."
+                    )
+                    return None
+            self.recent_emitted_plates[plate_key] = current_timestamp
+
+        self.event_counter += 1
+        event_id = f"EVT_{now.strftime('%Y%m%d')}_{self.event_counter:03d}"
+
+        # Save snapshots
+        vehicle_filename = f"vehicle_{event_id}.png"
+        vehicle_save_path = self.config.snapshots_dir / vehicle_filename
+        if track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
+            cv2.imwrite(str(vehicle_save_path), track.best_vehicle_crop)
+        else:
+            # Fallback if no crop available: generate blank placeholder image
+            placeholder = np.zeros((100, 100, 3), dtype=np.uint8)
+            cv2.imwrite(str(vehicle_save_path), placeholder)
+
+        plate_filename: Optional[str] = None
+        if has_plate and track.best_plate_crop is not None and track.best_plate_crop.size > 0:
+            plate_filename = f"plate_{event_id}.png"
+            plate_save_path = self.config.snapshots_dir / plate_filename
+            cv2.imwrite(str(plate_save_path), track.best_plate_crop)
+
+        # Build exact required JSON event format
+        event_data = {
+            "event_id": event_id,
+            "camera_id": self.config.camera_id,
+            "time": time_str,
+            "date": date_str,
+            "snapshot_number_plate": plate_filename if has_plate else None,
+            "snapshot_vehicle": vehicle_filename,
+            "plate_detection_confidence": (
+                round(float(track.best_plate_det_conf), 2)
+                if has_plate and track.best_plate_det_conf is not None
+                else None
+            ),
+            "number_plate": track.best_plate_text if has_plate else None,
+            "number_plate_confidence": (
+                round(float(track.best_plate_conf), 2)
+                if has_plate and track.best_plate_conf is not None
+                else None
+            ),
+        }
+
+        # Update statistics
+        self.total_unique_vehicles += 1
+        if has_plate:
+            self.total_with_plate += 1
+        else:
+            self.total_without_plate += 1
+
+        self.emitted_events.append(event_data)
+
+        # Append to JSONL for crash safety
+        with open(self.config.events_jsonl_path, "a", encoding="utf-8") as f_jsonl:
+            f_jsonl.write(json.dumps(event_data) + "\n")
+
+        # Save full JSON array
+        with open(self.config.events_json_path, "w", encoding="utf-8") as f_json:
+            json.dump(self.emitted_events, f_json, indent=2)
+
+        print(f"\n[EVENT RECORDED] {json.dumps(event_data, indent=2)}")
+        return event_data
+
+    def get_counts(self) -> Tuple[int, int, int, int]:
+        """
+        Returns (total_unique_vehicles, with_plate, without_plate, active_tracks)
+        """
+        active_count = sum(1 for t in self.tracks.values() if t.disappeared_count == 0)
+        return (
+            self.total_unique_vehicles,
+            self.total_with_plate,
+            self.total_without_plate,
+            active_count,
+        )
