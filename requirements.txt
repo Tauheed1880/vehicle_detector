@@ -13,11 +13,6 @@ opencv-python-headless>=4.9.0.80
 ultralytics>=8.3.0
 
 # Numerical, Image, and Config utilities
-numpy>=1.24.0,<2.0.0
+numpy>=1.24.0
 PyYAML>=6.0.1
 Pillow>=10.0.0
-
-# ONNX Runtime backend:
-# In Colab/Linux with GPU: run 'pip install onnxruntime-gpu'
-# On CPU-only environments: run 'pip install onnxruntime'
-# (Automated in install.sh and install.bat)
