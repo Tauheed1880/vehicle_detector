@@ -9,6 +9,7 @@ Combines:
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -122,6 +123,7 @@ class VehicleALPRPipeline:
             show_display = False
 
         frame_idx = 0
+        start_time = time.time()
         print(f"[PROCESS] Starting processing (Resolution: {width}x{height}, FPS: {fps:.1f}, Frames: {total_video_frames})...")
 
         try:
@@ -223,15 +225,29 @@ class VehicleALPRPipeline:
             if show_display:
                 cv2.destroyAllWindows()
 
+        end_time = time.time()
+        elapsed_sec = end_time - start_time
+        mins = int(elapsed_sec // 60)
+        secs = elapsed_sec % 60
+        avg_fps = frame_idx / elapsed_sec if elapsed_sec > 0 else 0.0
+
         u, p, np_cnt, _ = self.tracker_manager.get_counts()
-        print("\n" + "=" * 60)
-        print("PIPELINE PROCESSING COMPLETED")
-        print(f"Total Unique Vehicles Detected: {u}")
-        print(f"Vehicles With Number Plate:     {p}")
-        print(f"Vehicles Without Number Plate:  {np_cnt}")
-        print(f"Events Saved To:               {self.config.events_json_path.resolve()}")
-        print(f"Snapshots Saved In:            {self.config.snapshots_dir.resolve()}")
-        print("=" * 60 + "\n")
+        print("\n" + "=" * 65)
+        print("          PIPELINE VIDEO PROCESSING COMPLETED")
+        print("=" * 65)
+        print(f"Total Time Taken:              {mins:02d}m {secs:05.2f}s ({elapsed_sec:.2f} seconds)")
+        print(f"Total Frames Processed:        {frame_idx} frames")
+        print(f"Average Processing Speed:      {avg_fps:.2f} FPS")
+        print("-" * 65)
+        print(f"Total Unique Vehicles Found:   {u}")
+        print(f"  - Vehicles With Plate:       {p}")
+        print(f"  - Vehicles Without Plate:    {np_cnt}")
+        print("-" * 65)
+        print(f"Events JSON Saved To:          {self.config.events_json_path.resolve()}")
+        print(f"Snapshots Folder:              {self.config.snapshots_dir.resolve()}")
+        if output_video_path is not None:
+            print(f"Annotated Video Output:        {Path(output_video_path).resolve()}")
+        print("=" * 65 + "\n")
 
         return self.tracker_manager.emitted_events
 
