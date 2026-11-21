@@ -70,6 +70,7 @@ class TrackState:
     smoothed_box: Optional[List[float]] = None
     # Best vehicle snapshot data
     best_vehicle_box: Optional[List[int]] = None
+    best_full_frame: Optional[np.ndarray] = None
     best_vehicle_crop: Optional[np.ndarray] = None
     best_vehicle_area: float = 0.0
     # Best plate snapshot & OCR data
@@ -131,6 +132,7 @@ class VehicleTrackerManager:
                 disappeared_count=0,
                 smoothed_box=[float(x1), float(y1), float(x2), float(y2)],
                 best_vehicle_box=[x1, y1, x2, y2],
+                best_full_frame=frame.copy() if area > 0 else None,
                 best_vehicle_crop=vehicle_crop,
                 best_vehicle_area=area,
             )
@@ -155,7 +157,8 @@ class VehicleTrackerManager:
             if area > track.best_vehicle_area and area > 0:
                 track.best_vehicle_area = area
                 track.best_vehicle_box = [x1, y1, x2, y2]
-                if not track.has_event_emitted and vehicle_crop is not None:
+                if not track.has_event_emitted:
+                    track.best_full_frame = frame.copy()
                     track.best_vehicle_crop = vehicle_crop
 
         return self.tracks[track_id]
@@ -239,6 +242,9 @@ class VehicleTrackerManager:
                     track.best_plate_conf = ocr_conf
                     track.best_plate_det_conf = plate_det_conf
                     track.best_plate_crop = plate_crop
+                    track.best_full_frame = frame.copy()
+                    if track.smoothed_box is not None:
+                        track.best_vehicle_box = [int(v) for v in track.smoothed_box]
                     if vehicle_crop is not None and vehicle_crop.size > 0:
                         track.best_vehicle_crop = vehicle_crop
 
@@ -331,10 +337,56 @@ class VehicleTrackerManager:
         self.event_counter += 1
         event_id = generate_infinite_event_id(self.event_counter, self.config.camera_id, now)
 
-        # Save snapshots
+        # Save snapshot_vehicle as FULL-SIZE frame with bounding box ONLY on this specific vehicle
         vehicle_filename = f"vehicle_{event_id}.png"
         vehicle_save_path = self.config.snapshots_dir / vehicle_filename
-        if track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
+
+        if track.best_full_frame is not None and track.best_vehicle_box is not None:
+            full_frame_annotated = track.best_full_frame.copy()
+            h_f, w_f = full_frame_annotated.shape[:2]
+            vx1, vy1, vx2, vy2 = track.best_vehicle_box
+            vx1, vy1 = max(0, vx1), max(0, vy1)
+            vx2, vy2 = min(w_f, vx2), min(h_f, vy2)
+
+            # Box color: Green if plate detected, Orange if no plate
+            box_color = (0, 255, 0) if has_plate else (0, 140, 255)
+            # Draw highlight box ONLY on this specific vehicle
+            cv2.rectangle(full_frame_annotated, (vx1, vy1), (vx2, vy2), box_color, 3)
+
+            # Label on box
+            if has_plate:
+                conf_pct = (track.best_plate_conf or 0.0) * 100.0
+                label = f"ID:{track.track_id} | {track.best_plate_text} ({conf_pct:.0f}%)"
+            else:
+                label = f"ID:{track.track_id} | NO PLATE"
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.65
+            thickness = 2
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            label_y = max(th + 6, vy1 - 8)
+            cv2.rectangle(
+                full_frame_annotated,
+                (vx1, label_y - th - 6),
+                (vx1 + tw + 6, label_y + baseline + 2),
+                box_color,
+                -1,
+            )
+            cv2.putText(
+                full_frame_annotated,
+                label,
+                (vx1 + 3, label_y),
+                font,
+                font_scale,
+                (0, 0, 0),
+                thickness,
+                cv2.LINE_AA,
+            )
+
+            cv2.imwrite(str(vehicle_save_path), full_frame_annotated)
+            # Free memory immediately to keep RAM usage low
+            track.best_full_frame = None
+        elif track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
             cv2.imwrite(str(vehicle_save_path), track.best_vehicle_crop)
         else:
             placeholder = np.zeros((100, 100, 3), dtype=np.uint8)
