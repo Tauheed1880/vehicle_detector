@@ -7,6 +7,7 @@ Combines:
 4. Single-event generation per vehicle.
 """
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,14 @@ if str(REPO_ROOT) not in sys.path:
 from config import PipelineConfig
 from fast_alpr import ALPR
 from tracker import VehicleTrackerManager
+
+
+def has_gui_display() -> bool:
+    """Checks whether a graphical desktop display is available."""
+    if os.name == "nt":
+        return True
+    # On Linux/macOS, a display server is required for cv2.imshow
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 class VehicleALPRPipeline:
@@ -103,6 +112,14 @@ class VehicleALPRPipeline:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(str(out_p), fourcc, fps, (width, height))
             print(f"[OUTPUT] Writing annotated output video to: {out_p.resolve()}")
+
+        if show_display and not has_gui_display():
+            print("\n" + "-" * 65)
+            print("[INFO] Headless cloud environment detected (No physical monitor/display).")
+            print(f"[INFO] Disabling cv2.imshow window to prevent Qt crash.")
+            print(f"[INFO] Annotated video will be saved to: {output_video_path or self.config.base_output_dir}")
+            print("-" * 65 + "\n")
+            show_display = False
 
         frame_idx = 0
         print(f"[PROCESS] Starting processing (Resolution: {width}x{height}, FPS: {fps:.1f}, Frames: {total_video_frames})...")
