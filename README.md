@@ -20,7 +20,7 @@ Built on top of the open-source [FastALPR](https://github.com/ankandrew/fast-alp
 [![Vehicle Tracking & License Plate Recognition Demo](demo.gif)](https://www.youtube.com/watch?v=ArFPQdJRlo8)
 
 *Real-time Vehicle Detection, ByteTrack Tracking, and FastALPR License Plate Recognition.*  
-▶️ **[Watch Full Video on YouTube](https://www.youtube.com/watch?v=ArFPQdJRlo8)** | 📁 **[Download Local Video (demo_annotated.mp4)](demo_annotated.mp4)**
+▶️ **[Click Here to Play Video on YouTube (Full HD 1080p)](https://www.youtube.com/watch?v=ArFPQdJRlo8)**
 
 ---
 
