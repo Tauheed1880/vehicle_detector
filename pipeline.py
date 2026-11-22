@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -127,6 +127,64 @@ class VehicleALPRPipeline:
         self.tracker_manager = VehicleTrackerManager(self.config)
         self.preview_worker: Optional[ColabLivePreviewWorker] = None
         self.has_cuda = False
+        self._printed_char_conf_proof: bool = False
+
+    def _extract_ocr_confidences(
+        self, ocr_item, plate_crop: np.ndarray, frame_idx: int
+    ) -> Tuple[str, float, List[float]]:
+        """
+        Extracts raw_text, mean ocr_conf, and per_char_confs from an ALPR OCR result or directly
+        from fast_plate_ocr recognizer on the sharp plate crop if confidence is a single float.
+        """
+        raw_text = str(ocr_item.text) if (ocr_item and ocr_item.text) else ""
+        per_char_confs: Optional[List[float]] = None
+
+        if ocr_item is not None and isinstance(ocr_item.confidence, (list, tuple, np.ndarray)):
+            per_char_confs = [float(c) for c in ocr_item.confidence]
+            ocr_conf = float(np.mean(per_char_confs)) if per_char_confs else 0.0
+        elif ocr_item is not None and isinstance(ocr_item.confidence, (float, int)):
+            # Single float returned by ALPR: call fast_plate_ocr recognizer directly on SHARP plate crop
+            recognizer = getattr(getattr(self.alpr, "ocr", None), "ocr_model", None)
+            if recognizer is not None and plate_crop is not None and plate_crop.size > 0:
+                rec_crop = plate_crop
+                if hasattr(recognizer, "config") and hasattr(recognizer.config, "image_color_mode"):
+                    if recognizer.config.image_color_mode == "grayscale":
+                        rec_crop = cv2.cvtColor(rec_crop, cv2.COLOR_BGR2GRAY)
+                    elif recognizer.config.image_color_mode == "rgb":
+                        rec_crop = cv2.cvtColor(rec_crop, cv2.COLOR_BGR2RGB)
+                try:
+                    pred = recognizer.run_one(rec_crop, return_confidence=True)
+                    if hasattr(pred, "char_probs") and pred.char_probs is not None:
+                        per_char_confs = [float(x) for x in pred.char_probs.tolist()]
+                        if hasattr(pred, "plate") and pred.plate:
+                            raw_text = str(pred.plate)
+                except Exception:
+                    pass
+
+            if per_char_confs is not None and len(per_char_confs) > 0:
+                ocr_conf = float(np.mean(per_char_confs))
+            else:
+                ocr_conf = float(ocr_item.confidence)
+                per_char_confs = [ocr_conf] * len(raw_text)
+        else:
+            ocr_conf = 0.0
+            per_char_confs = []
+
+        if not self._printed_char_conf_proof and per_char_confs and raw_text:
+            print(
+                f"\n[OCR PROOF] Sample Read Text: '{raw_text}' | "
+                f"Per-character confidences ({len(per_char_confs)} chars): "
+                f"{[round(c, 4) for c in per_char_confs]}"
+            )
+            self._printed_char_conf_proof = True
+
+        if getattr(self.config, "debug_reads", False) and raw_text:
+            print(
+                f"[DEBUG READ] Frame {frame_idx:04d} | Text: '{raw_text:<10}' | "
+                f"Mean Conf: {ocr_conf:.3f} | Per-char: {[round(c, 3) for c in per_char_confs]}"
+            )
+
+        return raw_text, ocr_conf, per_char_confs
 
     def initialize_models(self) -> None:
         """Loads and verifies models on GPU/CUDA with native FP16 support without warnings."""
@@ -438,16 +496,13 @@ class VehicleALPRPipeline:
                                             if (pfx1 >= rx1 - 5) and (pfy1 >= ry1 - 5) and (pfx2 <= rx2 + 5) and (pfy2 <= ry2 + 5):
                                                 t.current_frame_candidate["plate_inside"] = True
 
-                                        if isinstance(item.ocr.confidence, (list, tuple, np.ndarray)):
-                                            per_char_confs = [float(c) for c in item.ocr.confidence]
-                                            ocr_conf = float(np.mean(per_char_confs)) if per_char_confs else 0.0
-                                        else:
-                                            ocr_conf = float(item.ocr.confidence)
-                                            per_char_confs = [ocr_conf] * len(str(item.ocr.text))
+                                        raw_text, ocr_conf, per_char_confs = self._extract_ocr_confidences(
+                                            item.ocr, plate_crop, frame_idx
+                                        )
 
                                         self.tracker_manager.update_track_plate(
                                             track_id=t.track_id,
-                                            raw_text=str(item.ocr.text),
+                                            raw_text=raw_text,
                                             ocr_conf=ocr_conf,
                                             det_conf=float(item.detection.confidence),
                                             plate_crop=plate_crop,
@@ -468,6 +523,7 @@ class VehicleALPRPipeline:
                                     alpr_results=alpr_predictions,
                                     frame=frame,
                                     frame_idx=frame_idx,
+                                    ocr_extractor=self._extract_ocr_confidences,
                                 )
                 prof_alpr += time.perf_counter() - t_alpr_start
 
@@ -674,12 +730,52 @@ class VehicleALPRPipeline:
                 complete_str = "YES" if m["is_complete"] else "NO"
                 plate_str = f"'{m['plate_text']}'" if m["plate_text"] else "NO PLATE"
                 conf_str = f"(Conf: {m['plate_conf'] * 100:.1f}%)" if m.get("plate_conf") else ""
+                size_str = m.get("snapshot_size", "N/A")
+                box_str = str(m.get("raw_box")) if m.get("raw_box") is not None else "None"
                 print(
                     f"  Event: {m['event_id']:<18} | Merged Tracks: {str(m['merged_track_ids']):<10} | "
-                    f"Snapshot Frame: {m['snapshot_frame_idx']:<4} | Complete: {complete_str:<3} | Plate: {plate_str:<12} {conf_str}"
+                    f"Snapshot Frame: {m['snapshot_frame_idx']:<4} | Complete: {complete_str:<3} | "
+                    f"Size: {size_str:<9} | Raw Box: {box_str:<22} | Plate: {plate_str:<12} {conf_str}"
                 )
         else:
             print("  (No events emitted)")
+        print("-" * 75)
+
+        # Overlapping Event Pairs calculation (box IoU > 0.5 within 2s)
+        overlapping_event_pairs = 0
+        emitted_metas = self.tracker_manager.emitted_events_meta
+        fps_val = float(fps if fps > 0 else 30.0)
+
+        def _box_iou_calc(b1, b2):
+            if not b1 or not b2:
+                return 0.0
+            ix1 = max(b1[0], b2[0])
+            iy1 = max(b1[1], b2[1])
+            ix2 = min(b1[2], b2[2])
+            iy2 = min(b1[3], b2[3])
+            iw = max(0.0, ix2 - ix1)
+            ih = max(0.0, iy2 - iy1)
+            inter = iw * ih
+            a1 = max(0.0, (b1[2] - b1[0]) * (b1[3] - b1[1]))
+            a2 = max(0.0, (b2[2] - b2[0]) * (b2[3] - b2[1]))
+            union = a1 + a2 - inter
+            return inter / union if union > 0 else 0.0
+
+        for i in range(len(emitted_metas)):
+            for j in range(i + 1, len(emitted_metas)):
+                m1 = emitted_metas[i]
+                m2 = emitted_metas[j]
+                f1 = m1.get("snapshot_frame_idx") or 0
+                f2 = m2.get("snapshot_frame_idx") or 0
+                time_diff_sec = abs(f1 - f2) / fps_val
+                if time_diff_sec <= 2.0:
+                    b1 = m1.get("raw_box")
+                    b2 = m2.get("raw_box")
+                    iou = _box_iou_calc(b1, b2)
+                    if iou > 0.5:
+                        overlapping_event_pairs += 1
+
+        print(f"Number of Event Pairs with box IoU > 0.5 within 2s: {overlapping_event_pairs}")
         print("-" * 75)
         print("List of Number Plates:")
         if detected_plates_with_conf:

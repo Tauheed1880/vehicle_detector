@@ -14,7 +14,9 @@ Examples:
 import argparse
 import json
 import os
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from config import PipelineConfig, load_camera_from_json
@@ -125,6 +127,18 @@ def parse_args():
         help="Turn off saving plate reads to plate_reads.jsonl and crops to plate_crops/.",
     )
     parser.add_argument(
+        "--keep-output",
+        action="store_true",
+        default=False,
+        help="Do not archive existing output/ folder before starting.",
+    )
+    parser.add_argument(
+        "--debug-reads",
+        action="store_true",
+        default=False,
+        help="Print verbose OCR reads and per-character confidences during execution.",
+    )
+    parser.add_argument(
         "--preview",
         action="store_true",
         default=True,
@@ -208,6 +222,22 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # 0. Output directory management
+    output_dir = Path("output")
+    if not args.keep_output and output_dir.exists():
+        try:
+            has_files = any(output_dir.iterdir())
+        except Exception:
+            has_files = False
+        if has_files:
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_dir = Path(f"output_prev_{timestamp_str}")
+            try:
+                shutil.move(str(output_dir), str(archive_dir))
+                print(f"[OUTPUT] Existing 'output/' directory archived to '{archive_dir}'")
+            except Exception as e:
+                print(f"[OUTPUT WARNING] Could not archive output/ to {archive_dir}: {e}")
+
     roi_poly = None
     if args.roi:
         try:
@@ -238,6 +268,7 @@ def main():
         include_remarks=args.include_remarks,
         box_smoothing_factor=args.box_smoothing,
         hud_box_smoothing_factor=args.hud_smoothing,
+        debug_reads=args.debug_reads,
         roi_polygon=roi_poly,
     )
 

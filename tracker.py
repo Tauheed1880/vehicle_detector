@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -800,10 +800,13 @@ class VehicleTrackerManager:
                 "crop_file_name": None,
             })
 
+        # Real maximum detector confidence across all detections of this vehicle
+        if track.best_plate_det_conf is None or float(det_conf) > float(track.best_plate_det_conf):
+            track.best_plate_det_conf = float(det_conf)
+
         is_better = (track.best_plate_conf is None) or (ocr_conf > track.best_plate_conf)
         if is_better:
             track.best_plate_crop = plate_crop.copy() if plate_crop is not None else None
-            track.best_plate_det_conf = det_conf
 
         consensus_result = character_level_voting(
             readings=track.plate_readings,
@@ -832,6 +835,7 @@ class VehicleTrackerManager:
         alpr_results: list,
         frame: np.ndarray,
         frame_idx: int,
+        ocr_extractor: Optional[Callable] = None,
     ) -> None:
         """Matches full-frame ALPR plate detections to vehicle tracks."""
         h, w = frame.shape[:2]
@@ -867,16 +871,20 @@ class VehicleTrackerManager:
                 plate_w = max(1, c_px2 - c_px1)
                 plate_h = max(1, c_py2 - c_py1)
 
-                if isinstance(ocr.confidence, (list, tuple, np.ndarray)):
-                    per_char_confs = [float(c) for c in ocr.confidence]
-                    ocr_conf = float(np.mean(per_char_confs)) if per_char_confs else 0.0
+                if ocr_extractor is not None:
+                    raw_text, ocr_conf, per_char_confs = ocr_extractor(ocr, plate_crop, frame_idx)
                 else:
-                    ocr_conf = float(ocr.confidence)
-                    per_char_confs = [ocr_conf] * len(str(ocr.text))
+                    raw_text = str(ocr.text)
+                    if isinstance(ocr.confidence, (list, tuple, np.ndarray)):
+                        per_char_confs = [float(c) for c in ocr.confidence]
+                        ocr_conf = float(np.mean(per_char_confs)) if per_char_confs else 0.0
+                    else:
+                        ocr_conf = float(ocr.confidence)
+                        per_char_confs = [ocr_conf] * len(raw_text)
 
                 self.update_track_plate(
                     track_id=best_match_id,
-                    raw_text=str(ocr.text),
+                    raw_text=raw_text,
                     ocr_conf=ocr_conf,
                     det_conf=float(det.confidence),
                     plate_crop=plate_crop,
@@ -993,7 +1001,13 @@ class VehicleTrackerManager:
                 or (absorbed.best_plate_conf or 0.0) > (survivor.best_plate_conf or 0.0)
             ):
                 survivor.best_plate_crop = absorbed.best_plate_crop
-                survivor.best_plate_det_conf = absorbed.best_plate_det_conf
+
+        if absorbed.best_plate_det_conf is not None:
+            if (
+                survivor.best_plate_det_conf is None
+                or float(absorbed.best_plate_det_conf) > float(survivor.best_plate_det_conf)
+            ):
+                survivor.best_plate_det_conf = float(absorbed.best_plate_det_conf)
 
         consensus_res = character_level_voting(
             readings=survivor.plate_readings,
@@ -1279,6 +1293,10 @@ class VehicleTrackerManager:
         vehicle_filename = f"vehicle_{event_id}.png"
         vehicle_save_path = self.config.snapshots_dir / vehicle_filename
 
+        crop_w_display = 0
+        crop_h_display = 0
+        raw_box_display = None
+
         if track.best_full_frame is not None and track.best_raw_box is not None:
             h_f, w_f = track.best_full_frame.shape[:2]
             rx1, ry1, rx2, ry2 = track.best_raw_box
@@ -1291,12 +1309,23 @@ class VehicleTrackerManager:
             cx2 = min(w_f, int(rx2 + pad_x))
             cy2 = min(h_f, int(ry2 + pad_y))
             clean_vehicle_crop = track.best_full_frame[cy1:cy2, cx1:cx2].copy()
+            crop_h_display, crop_w_display = clean_vehicle_crop.shape[:2]
+            raw_box_display = [int(v) for v in track.best_raw_box]
             self.snapshot_saver.submit(vehicle_save_path, clean_vehicle_crop)
         elif track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
+            crop_h_display, crop_w_display = track.best_vehicle_crop.shape[:2]
+            raw_box_display = [int(v) for v in track.best_raw_box] if track.best_raw_box is not None else None
             self.snapshot_saver.submit(vehicle_save_path, track.best_vehicle_crop)
         else:
             placeholder = np.zeros((100, 100, 3), dtype=np.uint8)
+            crop_h_display, crop_w_display = 100, 100
+            raw_box_display = None
             self.snapshot_saver.submit(vehicle_save_path, placeholder)
+
+        print(
+            f"[EVENT SNAPSHOT] Event {event_id}: Saved Snapshot Size={crop_w_display}x{crop_h_display}, "
+            f"Raw Box={raw_box_display}"
+        )
 
         # Context Full Frame with Annotation
         context_filename = f"context_{event_id}.png"
@@ -1378,6 +1407,8 @@ class VehicleTrackerManager:
             "is_complete": track.best_snapshot_complete,
             "plate_text": track.best_plate_text if has_plate else None,
             "plate_conf": round(float(track.best_plate_conf), 2) if (has_plate and track.best_plate_conf) else None,
+            "snapshot_size": f"{crop_w_display}x{crop_h_display}",
+            "raw_box": raw_box_display,
         }
         self.emitted_events_meta.append(meta)
 
