@@ -220,3 +220,13 @@ tensorboard/
 *.plan
 trt_engine_cache/
 tensorrt/
+
+# FastALPR run outputs & temporary artifacts
+output/
+output_prev_*/
+*.pt
+*.onnx
+*.bak*
+demo_annotated.mp4
+demo.gif
+frame_test.png
