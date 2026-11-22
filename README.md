@@ -73,7 +73,7 @@ Every emitted event produces a clean vehicle snapshot, a license plate crop (if 
 - **One-Event-Per-Vehicle Logic**: Vehicles are assigned a tracking ID across frames. When a track ends, the pipeline checks for prior tracks from the same camera that ended within 1 to 45 frames with matching plates, merging them into a single event. A 60-second fuzzy duplicate suppression window further eliminates re-emissions.
 - **Per-Character Confidence-Weighted Voting**: Rather than relying on a single frame read, the recognizer records each observation `(text, mean_conf, per_char_confs)`. Characters vote per position weighted by their confidence. If the winning character has $< 50\%$ vote share or $< 0.50$ mean confidence, it is marked with `'?'`.
 - **Edge-Cut Plate Rejection**: Plate detections whose bounding box is within 4 px of any frame boundary are rejected early (`reject_reason="plate_touches_frame_edge"`) to prevent corrupted syntax from partial plates entering voting.
-- **Best-Snapshot Selection**: Every frame evaluates `score = area_px * sharpness * (1.0 if complete else 0.35) * (1.5 if plate_inside)`. "Complete" requires the vehicle box to be clipped on at most one side with $< 15\%$ area clipped. Clean crops are taken from the raw detector box with 6% padding clamped to the frame borders.
+- **Best-Snapshot Selection**: Every frame evaluates `score = area_px * sharpness * (1.0 if complete else 0.35)`. "Complete" requires the vehicle box to be clipped on at most one side with $< 15\%$ area clipped. Clean crops are taken from the raw detector box with 6% padding clamped to the frame borders. Vehicle image selection is independent of number-plate visibility.
 
 ---
 

@@ -523,6 +523,8 @@ class TrackState:
     best_plate_text: Optional[str] = None
     best_plate_conf: Optional[float] = None
     best_plate_det_conf: Optional[float] = None
+    # Composite quality score of the currently selected best_plate_crop (Section 5)
+    best_plate_score: float = -1.0
     # Lifecycle flags
     has_event_emitted: bool = False
     plate_confident_reached: bool = False
@@ -694,6 +696,7 @@ class VehicleTrackerManager:
                     track.plate_readings.clear()
                     track.best_plate_text = None
                     track.best_plate_conf = None
+                    track.best_plate_score = -1.0
                     track.plate_confident_reached = False
 
             track.last_center = (cx, cy)
@@ -743,7 +746,6 @@ class VehicleTrackerManager:
                 "base_score": base_score,
                 "complete": complete,
                 "area_px": area_px,
-                "plate_inside": False,
             }
         else:
             track.current_frame_candidate = None
@@ -753,15 +755,14 @@ class VehicleTrackerManager:
     def commit_frame_snapshots(self) -> None:
         """
         Commits per-frame snapshot scores across all active tracks.
-        Applies 1.5x plate bonus if a plate was detected inside the vehicle box (Requirement C).
+        Vehicle image selection is independent of number-plate visibility (no plate-inside bonus).
         """
         for track in self.tracks.values():
             cand = track.current_frame_candidate
             if cand is None:
                 continue
 
-            bonus = 1.5 if cand.get("plate_inside", False) else 1.0
-            unnorm_score = cand["base_score"] * bonus
+            unnorm_score = cand["base_score"]
             track.max_sharpness = max(track.max_sharpness, cand["raw_sharp"])
 
             if unnorm_score > track.best_unnorm_score or track.best_full_frame is None:
@@ -879,9 +880,29 @@ class VehicleTrackerManager:
         if track.best_plate_det_conf is None or float(det_conf) > float(track.best_plate_det_conf):
             track.best_plate_det_conf = float(det_conf)
 
-        is_better = (track.best_plate_conf is None) or (ocr_conf > track.best_plate_conf)
-        if is_better:
-            track.best_plate_crop = plate_crop.copy() if plate_crop is not None else None
+        # -------------------------------------------------------------
+        # Best plate crop selection (Section 5):
+        # Select the most USEFUL overall plate image instead of the one with the highest OCR
+        # confidence alone. Composite score blends OCR confidence, plate detection confidence,
+        # crop sharpness, crop resolution and text readability. Every term is normalised to
+        # [0, 1] and the weights sum to 1.0. Vehicle image selection stays independent.
+        # -------------------------------------------------------------
+        sharp_norm = min(1.0, float(sharpness) / 500.0)
+        plate_area = float(actual_plate_w) * float(actual_plate_h)
+        res_norm = min(1.0, plate_area / 3000.0)
+        readable_chars = sum(1 for c in clean_confs if c >= 0.5)
+        readability = (readable_chars / len(clean_confs)) if clean_confs else 0.0
+        plate_score = (
+            0.45 * float(ocr_conf)
+            + 0.20 * float(det_conf)
+            + 0.15 * sharp_norm
+            + 0.10 * res_norm
+            + 0.10 * readability
+        )
+
+        if plate_crop is not None and plate_crop.size > 0 and plate_score > track.best_plate_score:
+            track.best_plate_score = plate_score
+            track.best_plate_crop = plate_crop.copy()
 
         consensus_result = character_level_voting(
             readings=track.plate_readings,
@@ -970,15 +991,6 @@ class VehicleTrackerManager:
                     frame_idx=frame_idx,
                     plate_bbox_frame=[float(px1), float(py1), float(px2), float(py2)],
                 )
-
-                # Check if plate is fully inside raw vehicle box for 1.5x score bonus
-                matched_track = self.tracks.get(best_match_id)
-                if matched_track and matched_track.current_frame_candidate:
-                    rb = matched_track.raw_box
-                    if rb is not None:
-                        rx1, ry1, rx2, ry2 = rb
-                        if (c_px1 >= rx1 - 5) and (c_py1 >= ry1 - 5) and (c_px2 <= rx2 + 5) and (c_py2 <= ry2 + 5):
-                            matched_track.current_frame_candidate["plate_inside"] = True
 
     def _boxes_overlap_match(self, b1: Optional[List[float]], b2: Optional[List[float]]) -> bool:
         """Computes IoU and containment between two boxes."""
@@ -1087,9 +1099,10 @@ class VehicleTrackerManager:
         if absorbed.best_plate_crop is not None:
             if (
                 survivor.best_plate_crop is None
-                or (absorbed.best_plate_conf or 0.0) > (survivor.best_plate_conf or 0.0)
+                or absorbed.best_plate_score > survivor.best_plate_score
             ):
                 survivor.best_plate_crop = absorbed.best_plate_crop
+                survivor.best_plate_score = absorbed.best_plate_score
 
         if absorbed.best_plate_det_conf is not None:
             if (

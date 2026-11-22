@@ -121,6 +121,17 @@ class PipelineConfig:
     convert_h264: bool = True             # Convert to H.264 / yuv420p with ffmpeg
 
     # -------------------------------------------------------------
+    # Asynchronous I/O & Bounded Queue Configuration
+    # Decode and annotated-video encoding run on background worker threads and overlap
+    # with AI inference instead of stalling the processing loop. Both queues are BOUNDED
+    # and use blocking puts (backpressure), so frames are never dropped or reordered -
+    # YOLO/ByteTrack still receive every frame in order.
+    # -------------------------------------------------------------
+    async_io: bool = True                 # Run frame decode + video encoding on worker threads
+    reader_queue_maxsize: int = 4         # Bounded decoder queue depth (frames)
+    writer_queue_maxsize: int = 8         # Bounded encoder queue depth (frames)
+
+    # -------------------------------------------------------------
     # Paths & Storage
     # -------------------------------------------------------------
     base_output_dir: Path = Path("output")

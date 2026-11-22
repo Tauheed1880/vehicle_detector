@@ -104,6 +104,159 @@ class ColabLivePreviewWorker:
             self.thread.join(timeout=1.0)
 
 
+class FrameSource:
+    """Decouples video decoding from the AI processing loop.
+
+    In async mode `cap.read()` runs on a background thread that feeds a small BOUNDED FIFO
+    queue. The queue uses blocking puts (backpressure), so no frame is ever dropped and frame
+    order is preserved - YOLO/ByteTrack keep receiving every frame in order. Decode I/O
+    therefore overlaps with inference instead of stalling it.
+
+    In sync mode it behaves exactly like a direct `cap.read()`.
+    """
+
+    def __init__(self, cap: cv2.VideoCapture, maxsize: int = 4, async_io: bool = True):
+        self.cap = cap
+        self.async_io = bool(async_io)
+        self.read_time: float = 0.0
+        self.frames_read: int = 0
+        self.frames_dropped: int = 0  # Always 0: bounded queue uses blocking put (no-drop policy)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.queue: Optional[queue.Queue] = None
+        if self.async_io:
+            self.queue = queue.Queue(maxsize=max(1, int(maxsize)))
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+
+    def _worker(self) -> None:
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            ret, frame = self.cap.read()
+            self.read_time += time.perf_counter() - t0
+            if not ret or frame is None:
+                break
+            self.frames_read += 1
+            # Bounded blocking put with stop-awareness -> backpressure, never drops a frame.
+            while not self._stop.is_set():
+                try:
+                    self.queue.put(frame, timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
+        # Sentinel so a waiting consumer unblocks cleanly at end of stream.
+        try:
+            self.queue.put(None, timeout=0.5)
+        except queue.Full:
+            pass
+
+    def read(self):
+        """Returns the next decoded frame, or None once the stream is exhausted."""
+        if not self.async_io:
+            t0 = time.perf_counter()
+            ret, frame = self.cap.read()
+            self.read_time += time.perf_counter() - t0
+            if not ret or frame is None:
+                return None
+            self.frames_read += 1
+            return frame
+
+        while True:
+            try:
+                return self.queue.get(timeout=0.2)
+            except queue.Empty:
+                if not self._thread.is_alive() and self.queue.empty():
+                    return None
+                continue
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+
+class VideoSink:
+    """Decouples annotated-video encoding from the AI processing loop.
+
+    Video encoding is the second-highest cost after detection. In async mode frames are
+    written on a background thread through a BOUNDED FIFO queue with blocking puts
+    (backpressure), so frame order and the total frame count are preserved exactly - no
+    frame is dropped or reordered, keeping the 1:1 input/output duration guarantee.
+
+    In sync mode it behaves exactly like a direct `cv2.VideoWriter.write()`.
+    """
+
+    def __init__(
+        self,
+        path,
+        fourcc: int,
+        fps: float,
+        size: Tuple[int, int],
+        maxsize: int = 8,
+        async_io: bool = True,
+    ):
+        self.writer = cv2.VideoWriter(str(path), fourcc, fps, size)
+        self.async_io = bool(async_io)
+        self.encode_time: float = 0.0
+        self.frames_written: int = 0
+        self.frames_dropped: int = 0  # Always 0: bounded queue uses blocking put (no-drop policy)
+        self.max_queue_depth: int = 0
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.queue: Optional[queue.Queue] = None
+        if self.async_io:
+            self.queue = queue.Queue(maxsize=max(1, int(maxsize)))
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+
+    def _worker(self) -> None:
+        while True:
+            try:
+                frame = self.queue.get(timeout=0.2)
+            except queue.Empty:
+                if self._stop.is_set() and self.queue.empty():
+                    break
+                continue
+            if frame is None:
+                self.queue.task_done()
+                break
+            t0 = time.perf_counter()
+            self.writer.write(frame)
+            self.encode_time += time.perf_counter() - t0
+            self.frames_written += 1
+            self.queue.task_done()
+
+    def write(self, frame: np.ndarray) -> None:
+        if not self.async_io:
+            t0 = time.perf_counter()
+            self.writer.write(frame)
+            self.encode_time += time.perf_counter() - t0
+            self.frames_written += 1
+            return
+        # Bounded blocking put -> backpressure, never drops or reorders frames.
+        while not self._stop.is_set():
+            try:
+                self.queue.put(frame, timeout=0.2)
+                depth = self.queue.qsize()
+                if depth > self.max_queue_depth:
+                    self.max_queue_depth = depth
+                return
+            except queue.Full:
+                continue
+
+    def stop(self) -> None:
+        """Drains the queue, joins the encoder thread and releases the writer."""
+        if self.async_io:
+            self._stop.set()
+            try:
+                self.queue.put(None, timeout=1.0)
+            except queue.Full:
+                pass
+            if self._thread is not None and self._thread.is_alive():
+                self._thread.join(timeout=30.0)
+        self.writer.release()
+
+
 class VehicleALPRPipeline:
     def __init__(self, config: Optional[PipelineConfig] = None):
         self.config = config or PipelineConfig()
@@ -294,7 +447,16 @@ class VehicleALPRPipeline:
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         expected_duration = total_video_frames / fps if total_video_frames > 0 else 0.0
 
-        writer = None
+        # Asynchronous (or synchronous) frame decoder: bounded queue, no frame drops.
+        frame_source = FrameSource(
+            cap,
+            maxsize=self.config.reader_queue_maxsize,
+            async_io=self.config.async_io,
+        )
+        io_mode = "ASYNC (decoder + encoder threads)" if self.config.async_io else "SYNC (single thread)"
+        print(f"[I/O MODE] Video I/O: {io_mode} | Decoder queue: {self.config.reader_queue_maxsize} | Encoder queue: {self.config.writer_queue_maxsize}")
+
+        video_sink = None
         raw_output_path = None
         output_frames_written = 0
 
@@ -303,7 +465,14 @@ class VehicleALPRPipeline:
             out_p.parent.mkdir(parents=True, exist_ok=True)
             raw_output_path = out_p.with_name("raw_" + out_p.name)
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(str(raw_output_path), fourcc, fps, (width, height))
+            video_sink = VideoSink(
+                raw_output_path,
+                fourcc,
+                fps,
+                (width, height),
+                maxsize=self.config.writer_queue_maxsize,
+                async_io=self.config.async_io,
+            )
             print(f"[OUTPUT] Writing video at {fps:.1f} FPS to: {raw_output_path.resolve()}")
 
         if self.config.show_preview:
@@ -348,15 +517,17 @@ class VehicleALPRPipeline:
         pipeline_wall_start = time.perf_counter()
 
         try:
-            while cap.isOpened():
+            while True:
                 # ---------------------------------------------------------
-                # 1. Frame Read & Decode
+                # 1. Frame Read & Decode (async decoder thread, or direct read in SYNC mode)
+                # In ASYNC mode this waits on a bounded FIFO queue with blocking puts, so no
+                # frame is ever dropped and frame order is preserved for YOLO/ByteTrack.
                 # ---------------------------------------------------------
                 t_r_start = time.perf_counter()
-                ret, frame = cap.read()
+                frame = frame_source.read()
                 prof_read += time.perf_counter() - t_r_start
 
-                if not ret or frame is None:
+                if frame is None:
                     break
 
                 frame_idx += 1
@@ -568,15 +739,13 @@ class VehicleALPRPipeline:
                                         plate_w = max(1, px2 - px1)
                                         plate_h = max(1, py2 - py1)
 
-                                        # Check if plate box in frame coordinates is fully inside raw vehicle box for 1.5x score bonus
+                                        # Plate box in full-frame coordinates (edge-cut rejection + HUD).
+                                        # Vehicle image selection is intentionally independent of plate
+                                        # visibility, so no plate-inside bonus is computed here.
                                         pfx1 = cx1 + px1
                                         pfy1 = cy1 + py1
                                         pfx2 = cx1 + px2
                                         pfy2 = cy1 + py2
-                                        if t.raw_box is not None and t.current_frame_candidate is not None:
-                                            rx1, ry1, rx2, ry2 = t.raw_box
-                                            if (pfx1 >= rx1 - 5) and (pfy1 >= ry1 - 5) and (pfx2 <= rx2 + 5) and (pfy2 <= ry2 + 5):
-                                                t.current_frame_candidate["plate_inside"] = True
 
                                         raw_text, ocr_conf, per_char_confs = self._extract_ocr_confidences(
                                             item.ocr, plate_crop, frame_idx
@@ -630,8 +799,8 @@ class VehicleALPRPipeline:
                 # 7. Video Encoding
                 # ---------------------------------------------------------
                 t_enc_start = time.perf_counter()
-                if writer is not None and annotated_frame is not None:
-                    writer.write(annotated_frame)
+                if video_sink is not None and annotated_frame is not None:
+                    video_sink.write(annotated_frame)
                     output_frames_written += 1
                 prof_encode += time.perf_counter() - t_enc_start
 
@@ -653,15 +822,17 @@ class VehicleALPRPipeline:
                     )
 
         finally:
-            cap.release()
+            frame_source.stop()
             if self.preview_worker is not None:
                 self.preview_worker.stop()
 
             # End of video flush
             self.tracker_manager.check_and_emit_events(current_frame_idx=frame_idx, force_all=True)
 
-            if writer is not None:
-                writer.release()
+            # Drain the encoder queue, join the encoder thread, then release capture.
+            if video_sink is not None:
+                video_sink.stop()
+            cap.release()
 
             # ---------------------------------------------------------
             # 9. Wait for Async Snapshot Saver & Profile It!
@@ -772,6 +943,17 @@ class VehicleALPRPipeline:
         print(f"8. Live Preview Queueing:      {prof_preview:6.2f}s  ({(prof_preview/pipeline_wall_total)*100:5.1f}%)")
         print(f"9. Snapshot Disk Write (Async):{prof_snapshot_wait:6.2f}s  ({(prof_snapshot_wait/pipeline_wall_total)*100:5.1f}%)")
         print(f"10. Python Overhead/Loop Misc: {prof_unaccounted:6.2f}s  ({(prof_unaccounted/pipeline_wall_total)*100:5.1f}%)")
+        print("-" * 75)
+        io_mode_label = "ASYNC" if self.config.async_io else "SYNC"
+        enc_time = video_sink.encode_time if video_sink is not None else 0.0
+        enc_frames = video_sink.frames_written if video_sink is not None else 0
+        enc_depth = video_sink.max_queue_depth if video_sink is not None else 0
+        dec_dropped = frame_source.frames_dropped
+        enc_dropped = video_sink.frames_dropped if video_sink is not None else 0
+        print(f"ASYNC I/O DETAILS ({io_mode_label} mode, bounded no-drop backpressure queues):")
+        print(f"   Decoder thread decode:      {frame_source.read_time:6.2f}s over {frame_source.frames_read} frames (queue size {self.config.reader_queue_maxsize})")
+        print(f"   Encoder thread encode:      {enc_time:6.2f}s over {enc_frames} frames (max queue depth {enc_depth}/{self.config.writer_queue_maxsize})")
+        print(f"   Frames Dropped:             decoder {dec_dropped} | encoder {enc_dropped}")
         print("-" * 75)
         print(f"Total Accounted Time:          {total_accounted + prof_unaccounted:6.2f}s  (100.0%)")
         print("=" * 75)
