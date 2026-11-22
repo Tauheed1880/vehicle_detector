@@ -430,19 +430,42 @@ class VehicleALPRPipeline:
                             union = a1 + a2 - inter
                             return inter / union if union > 0 else 0.0
 
+                        # TODO: single-pass detection+tracking for 40-camera version
                         matched_raw_boxes = {}
                         for t_id, k_box in zip(ids, xyxys):
                             best_iou = 0.0
-                            best_rbox = None
+                            best_rbox_iou = None
                             for r_box in raw_det_boxes:
                                 iou = _box_iou_diag(k_box, r_box)
                                 if iou > best_iou:
                                     best_iou = iou
-                                    best_rbox = r_box
-                            if best_iou > 0.15 and best_rbox is not None:
-                                matched_raw_boxes[t_id] = best_rbox
+                                    best_rbox_iou = r_box
+
+                            chosen_rbox = None
+                            if best_iou >= 0.15 and best_rbox_iou is not None:
+                                chosen_rbox = best_rbox_iou
                             else:
-                                matched_raw_boxes[t_id] = None
+                                # Fallback: choose raw box that overlaps tracker box most as fraction of RAW box area (>= 0.6)
+                                best_containment = 0.0
+                                best_rbox_cont = None
+                                for r_box in raw_det_boxes:
+                                    ix1 = max(k_box[0], r_box[0])
+                                    iy1 = max(k_box[1], r_box[1])
+                                    ix2 = min(k_box[2], r_box[2])
+                                    iy2 = min(k_box[3], r_box[3])
+                                    iw = max(0.0, ix2 - ix1)
+                                    ih = max(0.0, iy2 - iy1)
+                                    inter = iw * ih
+                                    raw_area = max(1e-5, (r_box[2] - r_box[0]) * (r_box[3] - r_box[1]))
+                                    frac = inter / raw_area
+                                    if frac > best_containment:
+                                        best_containment = frac
+                                        best_rbox_cont = r_box
+                                if best_containment >= 0.6 and best_rbox_cont is not None:
+                                    chosen_rbox = best_rbox_cont
+
+                            # Fall back to tracker box itself if still no match, never None
+                            matched_raw_boxes[t_id] = chosen_rbox if chosen_rbox is not None else [float(v) for v in k_box]
 
                         # Diagnosis requirement A1: debug print tracker box vs raw box once per 10 frames
                         if getattr(self.config, "debug_reads", False) and (frame_idx % 10 == 0):
