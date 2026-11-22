@@ -29,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from config import PipelineConfig
 from fast_alpr import ALPR
-from tracker import VehicleTrackerManager, filter_nested_boxes
+from tracker import VehicleTrackerManager, filter_nested_boxes, levenshtein_distance
 
 
 class ColabLivePreviewWorker:
@@ -405,6 +405,64 @@ class VehicleALPRPipeline:
                             containment_thresh=self.config.box_containment_thresh,
                         )
 
+                        # Requirement A1: Fetch raw YOLO detections to match each tracker/Kalman box
+                        raw_det_boxes = []
+                        try:
+                            raw_preds = self.vehicle_model.predict(
+                                source=frame,
+                                classes=self.config.vehicle_classes,
+                                conf=self.config.vehicle_conf_thresh,
+                                imgsz=self.config.vehicle_imgsz,
+                                verbose=False,
+                            )
+                            if raw_preds and len(raw_preds) > 0 and raw_preds[0].boxes is not None:
+                                raw_det_boxes = raw_preds[0].boxes.xyxy.cpu().tolist()
+                        except Exception:
+                            raw_det_boxes = []
+
+                        def _box_iou_diag(b1, b2):
+                            ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
+                            ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
+                            iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+                            inter = iw * ih
+                            a1 = max(0.0, (b1[2] - b1[0]) * (b1[3] - b1[1]))
+                            a2 = max(0.0, (b2[2] - b2[0]) * (b2[3] - b2[1]))
+                            union = a1 + a2 - inter
+                            return inter / union if union > 0 else 0.0
+
+                        matched_raw_boxes = {}
+                        for t_id, k_box in zip(ids, xyxys):
+                            best_iou = 0.0
+                            best_rbox = None
+                            for r_box in raw_det_boxes:
+                                iou = _box_iou_diag(k_box, r_box)
+                                if iou > best_iou:
+                                    best_iou = iou
+                                    best_rbox = r_box
+                            if best_iou > 0.15 and best_rbox is not None:
+                                matched_raw_boxes[t_id] = best_rbox
+                            else:
+                                matched_raw_boxes[t_id] = None
+
+                        # Diagnosis requirement A1: debug print tracker box vs raw box once per 10 frames
+                        if getattr(self.config, "debug_reads", False) and (frame_idx % 10 == 0):
+                            for t_id, k_box in zip(ids, xyxys):
+                                r_box = matched_raw_boxes.get(t_id)
+                                area_k = (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])
+                                if r_box is not None:
+                                    area_r = (r_box[2] - r_box[0]) * (r_box[3] - r_box[1])
+                                    ratio = area_k / max(1.0, area_r)
+                                    r_str = f"{[round(v, 1) for v in r_box]} (Area: {area_r:.0f})"
+                                else:
+                                    ratio = 1.0
+                                    r_str = "None (No raw YOLO detection matched)"
+                                print(
+                                    f"[BOX DIAGNOSTIC] Frame {frame_idx:03d} | Track ID {t_id:02d}:\n"
+                                    f"  (a) Tracker/Kalman Box: {[round(v, 1) for v in k_box]} (Area: {area_k:.0f})\n"
+                                    f"  (b) Raw YOLO Det Box:   {r_str}\n"
+                                    f"  Ratio (Tracker/Raw):    {ratio:.2f}x"
+                                )
+
                         for t_id, xyxy in zip(ids, xyxys):
                             if any(np.allclose(xyxy, cb, atol=2.0) for cb in clean_boxes):
                                 active_track_ids.add(t_id)
@@ -413,6 +471,7 @@ class VehicleALPRPipeline:
                                     box=xyxy,
                                     frame=frame,
                                     frame_idx=frame_idx,
+                                    raw_det_box=matched_raw_boxes.get(t_id),
                                 )
 
                 self.tracker_manager.mark_disappeared_tracks(active_track_ids)
@@ -511,6 +570,7 @@ class VehicleALPRPipeline:
                                             plate_w=plate_w,
                                             plate_h=plate_h,
                                             frame_idx=frame_idx,
+                                            plate_bbox_frame=[float(pfx1), float(pfy1), float(pfx2), float(pfy2)],
                                         )
                         else:
                             # -------------------------------------------------
@@ -773,6 +833,15 @@ class VehicleALPRPipeline:
                     b2 = m2.get("raw_box")
                     iou = _box_iou_calc(b1, b2)
                     if iou > 0.5:
+                        p1 = m1.get("plate_text")
+                        p2 = m2.get("plate_text")
+                        c1 = m1.get("plate_conf") or 0.0
+                        c2 = m2.get("plate_conf") or 0.0
+                        has_conf1 = bool(p1 and "?" not in p1 and len(p1) >= self.config.min_plate_length and c1 >= self.config.min_confident_plate_conf)
+                        has_conf2 = bool(p2 and "?" not in p2 and len(p2) >= self.config.min_plate_length and c2 >= self.config.min_confident_plate_conf)
+                        # Requirement A5: ignore pairs where both events have different confident plates (levenshtein > 2)
+                        if has_conf1 and has_conf2 and levenshtein_distance(p1, p2) > 2:
+                            continue
                         overlapping_event_pairs += 1
 
         print(f"Number of Event Pairs with box IoU > 0.5 within 2s: {overlapping_event_pairs}")

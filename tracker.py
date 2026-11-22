@@ -326,6 +326,42 @@ def is_fuzzy_duplicate_plate(p1: str, p2: str, max_distance: int = 2) -> bool:
     return dp[len(p1)][len(p2)] <= max_distance
 
 
+def plates_match_differ_by_one(p1: Optional[str], p2: Optional[str]) -> bool:
+    """
+    Returns True if plates are identical or differ by <= 1 character,
+    ignoring '?' positions. Both must have >= 3 known characters. (Requirement A3)
+    """
+    if not p1 or not p2:
+        return False
+    k1 = [c for c in p1 if c != "?"]
+    k2 = [c for c in p2 if c != "?"]
+    if len(k1) < 3 or len(k2) < 3:
+        return False
+
+    if len(p1) == len(p2):
+        mismatches = sum(1 for c1, c2 in zip(p1, p2) if c1 != "?" and c2 != "?" and c1 != c2)
+        return mismatches <= 1
+
+    if abs(len(p1) - len(p2)) > 1:
+        return False
+
+    dp = [[0] * (len(p2) + 1) for _ in range(len(p1) + 1)]
+    for i in range(len(p1) + 1):
+        dp[i][0] = i
+    for j in range(len(p2) + 1):
+        dp[0][j] = j
+    for i in range(1, len(p1) + 1):
+        for j in range(1, len(p2) + 1):
+            c1, c2 = p1[i - 1], p2[j - 1]
+            cost = 0 if (c1 == "?" or c2 == "?" or c1 == c2) else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost,
+            )
+    return dp[len(p1)][len(p2)] <= 1
+
+
 def character_level_voting(
     readings: List[Tuple],
     min_length: int = 4,
@@ -553,13 +589,20 @@ class VehicleTrackerManager:
         box: List[float],
         frame: np.ndarray,
         frame_idx: int,
+        raw_det_box: Optional[List[float]] = None,
     ) -> TrackState:
         """
         Updates an existing track or initializes a new track state.
         Detects spatial jumps (ID switches) and enforces the readable zone gate.
-        Computes per-frame snapshot candidate using raw detector boxes (Requirement C).
+        Uses the RAW YOLO detection box for the vehicle snapshot crop and best-frame score (Requirement A1).
+        Evaluates completeness: clipped on <= 1 side and clipped part < 15% (Requirement A4).
         """
-        raw_box = [float(v) for v in box]
+        kalman_box = [float(v) for v in box]
+        if raw_det_box is not None:
+            raw_box = [float(v) for v in raw_det_box]
+        else:
+            raw_box = [float(v) for v in box]
+
         rx1, ry1, rx2, ry2 = raw_box
         h, w = frame.shape[:2]
 
@@ -577,7 +620,11 @@ class VehicleTrackerManager:
         inside_area = float(inside_bw * inside_bh)
 
         inside = inside_area / max(1e-5, raw_area)
-        complete = bool((inside >= 0.97) and (rx1 >= 12.0) and (ry1 >= 12.0) and (rx2 <= float(w) - 12.0) and (ry2 <= float(h) - 12.0))
+        # Requirement A4: "complete" means: vehicle box is clipped by the frame on at most one side and the clipped part is < 15% of the box area.
+        # Fixed 12 px margin rule removed.
+        clipped_sides = int(rx1 < 0.0) + int(ry1 < 0.0) + int(rx2 > float(w)) + int(ry2 > float(h))
+        clipped_part = max(0.0, raw_area - inside_area) / max(1e-5, raw_area)
+        complete = (clipped_sides <= 1) and (clipped_part < 0.15)
 
         # Vehicle crop with 6% padding clamped to frame (clean, no boxes/labels)
         pad_x = int(raw_bw * 0.06)
@@ -612,17 +659,18 @@ class VehicleTrackerManager:
                 frames_tracked=1,
                 disappeared_count=0,
                 smoothed_box=[rx1, ry1, rx2, ry2],
-                hud_smoothed_box=[rx1, ry1, rx2, ry2],
+                hud_smoothed_box=[kalman_box[0], kalman_box[1], kalman_box[2], kalman_box[3]],
+                kalman_box=kalman_box,
                 raw_box=raw_box,
                 first_raw_box=raw_box,
                 last_raw_box=raw_box,
                 frame_boxes={frame_idx: raw_box},
                 last_center=(cx, cy),
-                best_raw_box=raw_box,
-                best_vehicle_box=[int(rx1), int(ry1), int(rx2), int(ry2)],
-                best_full_frame=frame.copy() if raw_area > 0 else None,
-                best_vehicle_crop=vehicle_crop,
-                best_vehicle_area=raw_area,
+                best_raw_box=raw_box if raw_det_box is not None else None,
+                best_vehicle_box=[int(rx1), int(ry1), int(rx2), int(ry2)] if raw_det_box is not None else None,
+                best_full_frame=frame.copy() if (raw_area > 0 and raw_det_box is not None) else None,
+                best_vehicle_crop=vehicle_crop if raw_det_box is not None else None,
+                best_vehicle_area=raw_area if raw_det_box is not None else 0.0,
                 max_vehicle_area=raw_area,
                 has_complete_frame=complete,
                 max_sharpness=raw_sharp,
@@ -632,6 +680,7 @@ class VehicleTrackerManager:
             self.tracks[track_id] = track
         else:
             track = self.tracks[track_id]
+            track.kalman_box = kalman_box
 
             # Spatial Jump Check
             if track.last_center is not None and track.frames_tracked > 2:
@@ -668,28 +717,32 @@ class VehicleTrackerManager:
                     for c, s in zip(raw_box, track.smoothed_box)
                 ]
 
-            # HUD smoothing for visualization display
+            # HUD smoothing for visualization display uses Kalman box for stability
             hud_alpha = getattr(self.config, "hud_box_smoothing_factor", 0.65)
             if track.hud_smoothed_box is None:
-                track.hud_smoothed_box = [rx1, ry1, rx2, ry2]
+                track.hud_smoothed_box = [kalman_box[0], kalman_box[1], kalman_box[2], kalman_box[3]]
             else:
                 track.hud_smoothed_box = [
                     hud_alpha * float(c) + (1.0 - hud_alpha) * float(s)
-                    for c, s in zip(raw_box, track.hud_smoothed_box)
+                    for c, s in zip(kalman_box, track.hud_smoothed_box)
                 ]
 
         # Stage candidate for commit after ALPR evaluation in this frame
-        track.current_frame_candidate = {
-            "frame_idx": frame_idx,
-            "raw_box": raw_box,
-            "full_frame": frame,
-            "vehicle_crop": vehicle_crop,
-            "raw_sharp": raw_sharp,
-            "base_score": base_score,
-            "complete": complete,
-            "area_px": area_px,
-            "plate_inside": False,
-        }
+        # Only stage snapshot candidate if a real raw YOLO detection matched this frame (Requirement A1)
+        if raw_det_box is not None:
+            track.current_frame_candidate = {
+                "frame_idx": frame_idx,
+                "raw_box": raw_box,
+                "full_frame": frame,
+                "vehicle_crop": vehicle_crop,
+                "raw_sharp": raw_sharp,
+                "base_score": base_score,
+                "complete": complete,
+                "area_px": area_px,
+                "plate_inside": False,
+            }
+        else:
+            track.current_frame_candidate = None
 
         return track
 
@@ -738,15 +791,28 @@ class VehicleTrackerManager:
         plate_w: int = 0,
         plate_h: int = 0,
         frame_idx: int = 0,
+        plate_bbox_frame: Optional[List[float]] = None,
     ) -> None:
         """
         Directly associates a plate prediction to a track.
-        Enforces plate mutability lock and consensus voting.
-        NOTE: Vehicle snapshots are governed strictly by snapshot scoring (Requirement C).
+        Enforces plate mutability lock, consensus voting, and edge-cut rejection (Requirement A2).
+        Records plate box in full-frame coordinates for HUD visualization (Part B).
         """
         track = self.tracks.get(track_id)
         if track is None or track.has_event_emitted:
             return
+
+        # Requirement A2: Ignore edge-cut plate reads within 4 px of frame border on ANY side
+        if plate_bbox_frame is not None:
+            pfx1, pfy1, pfx2, pfy2 = plate_bbox_frame
+            h_f, w_f = frame.shape[:2]
+            if (pfx1 <= 4.0) or (pfy1 <= 4.0) or (pfx2 >= float(w_f) - 4.0) or (pfy2 >= float(h_f) - 4.0):
+                if getattr(self.config, "debug_reads", False):
+                    print(
+                        f"[DEBUG TRACKER] Plate read rejected (reject_reason='plate_touches_frame_edge'): "
+                        f"text='{raw_text}' box={[round(v, 1) for v in plate_bbox_frame]} frame={w_f}x{h_f}"
+                    )
+                return
 
         raw_str = str(raw_text).strip().upper()
         if per_char_confs is None or len(per_char_confs) != len(raw_str):
@@ -893,6 +959,7 @@ class VehicleTrackerManager:
                     plate_w=plate_w,
                     plate_h=plate_h,
                     frame_idx=frame_idx,
+                    plate_bbox_frame=[float(px1), float(py1), float(px2), float(py2)],
                 )
 
                 # Check if plate is fully inside raw vehicle box for 1.5x score bonus
@@ -926,11 +993,20 @@ class VehicleTrackerManager:
 
     def can_stitch_tracks(self, t1: TrackState, t2: TrackState) -> bool:
         """
-        Evaluates whether two tracks represent the same vehicle (Requirement A):
+        Evaluates whether two tracks represent the same vehicle:
+        A3: Plate-based stitching (plates identical or diff <= 1 char ignoring '?' within 45 frames, regardless of box overlap).
         1. Time overlap: active at same time, or start within 20 frames of other's last frame.
         2. Confident plate check: levenshtein <= 2 if both have confident plates.
         3. Box overlap: IoU > 0.25 or containment > 0.60.
         """
+        # Requirement A3: Plate-based stitching
+        time_gap = max(0, max(t1.first_frame_idx, t2.first_frame_idx) - min(t1.last_frame_idx, t2.last_frame_idx))
+        if time_gap <= 45:
+            p1 = t1.best_plate_text
+            p2 = t2.best_plate_text
+            if p1 and p2 and plates_match_differ_by_one(p1, p2):
+                return True
+
         # 1. Time overlap / proximity check
         time_overlap = False
         if max(t1.first_frame_idx, t2.first_frame_idx) <= min(t1.last_frame_idx, t2.last_frame_idx):
