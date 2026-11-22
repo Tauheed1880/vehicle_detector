@@ -114,8 +114,15 @@ def parse_args():
         "--partial-plate-policy",
         type=str,
         choices=["drop", "keep_low_conf"],
-        default="drop",
-        help="Policy for incomplete plate reads ('drop' marks as without-plate, 'keep_low_conf' keeps with low conf).",
+        default="keep_low_conf",
+        help="Policy for incomplete plate reads ('keep_low_conf' keeps with '?' and capped conf, 'drop' marks as without-plate).",
+    )
+    parser.add_argument(
+        "--no-plate-data",
+        dest="collect_plate_data",
+        action="store_false",
+        default=True,
+        help="Turn off saving plate reads to plate_reads.jsonl and crops to plate_crops/.",
     )
     parser.add_argument(
         "--preview",
@@ -172,6 +179,18 @@ def parse_args():
         help="Include optional 'remarks' field in JSON event output.",
     )
     parser.add_argument(
+        "--box-smoothing",
+        type=float,
+        default=0.0,
+        help="Box smoothing factor for tracker (default: 0.0 for zero lag on ALPR / snapshots).",
+    )
+    parser.add_argument(
+        "--hud-smoothing",
+        type=float,
+        default=0.65,
+        help="Box smoothing factor for HUD visualization display only (default: 0.65).",
+    )
+    parser.add_argument(
         "--roi",
         type=str,
         default=None,
@@ -209,6 +228,7 @@ def main():
         max_disappeared_frames=args.disappeared_frames,
         min_readable_vehicle_area=args.min_area,
         partial_plate_policy=args.partial_plate_policy,
+        collect_plate_data=args.collect_plate_data,
         show_preview=args.preview,
         save_video=args.save_video,
         sync_realtime=args.sync_realtime,
@@ -216,6 +236,8 @@ def main():
         uk_syntax_correction=args.uk_syntax,
         print_events_to_terminal=args.print_events,
         include_remarks=args.include_remarks,
+        box_smoothing_factor=args.box_smoothing,
+        hud_box_smoothing_factor=args.hud_smoothing,
         roi_polygon=roi_poly,
     )
 

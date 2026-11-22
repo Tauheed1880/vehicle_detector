@@ -82,8 +82,10 @@ class PipelineConfig:
     plate_regex_pattern: Optional[str] = None
     enforce_regex: bool = False
     uk_syntax_correction: bool = True
-    # Partial plate policy: "drop" (ignore incomplete reads) or "keep_low_conf"
-    partial_plate_policy: str = "drop"
+    # Partial plate policy: "keep_low_conf" (keep text with '?', confidence capped at 0.60) or "drop"
+    partial_plate_policy: str = "keep_low_conf"
+    min_known_chars: int = 3               # Minimum non-'?' characters required to keep partial plate
+    collect_plate_data: bool = True        # Collect OCR reads and plate crops for fine-tuning
 
     # -------------------------------------------------------------
     # Single Detection & Fuzzy Duplicate Suppression
@@ -93,7 +95,8 @@ class PipelineConfig:
     min_confident_plate_conf: float = 0.70
     duplicate_plate_window_sec: float = 60.0  # Suppress duplicate events within 60s
     fuzzy_plate_max_distance: int = 2         # Max Levenshtein distance for duplicate matching
-    box_smoothing_factor: float = 0.65        # EMA box smoothing
+    box_smoothing_factor: float = 0.0         # 0.0 for raw detector boxes (zero lag on ALPR & vehicle snapshots)
+    hud_box_smoothing_factor: float = 0.65    # Smoothing factor for HUD video visualization only
     include_remarks: bool = False             # Set True only if remarks field is requested
     print_events_to_terminal: bool = False    # Set True to print event JSON on console
 
@@ -122,6 +125,8 @@ class PipelineConfig:
     snapshots_dir: Path = Path("output/snapshots")
     events_json_path: Path = Path("output/events.json")
     events_jsonl_path: Path = Path("output/events.jsonl")
+    plate_reads_jsonl_path: Path = Path("output/plate_reads.jsonl")
+    plate_crops_dir: Path = Path("output/plate_crops")
     drive_output_dir: Path = Path("/content/drive/MyDrive/ALPR_Output")
 
     def __post_init__(self) -> None:
@@ -129,8 +134,12 @@ class PipelineConfig:
         self.snapshots_dir = Path(self.snapshots_dir)
         self.events_json_path = Path(self.events_json_path)
         self.events_jsonl_path = Path(self.events_jsonl_path)
+        self.plate_reads_jsonl_path = Path(self.plate_reads_jsonl_path)
+        self.plate_crops_dir = Path(self.plate_crops_dir)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self.base_output_dir.mkdir(parents=True, exist_ok=True)
+        if self.collect_plate_data:
+            self.plate_crops_dir.mkdir(parents=True, exist_ok=True)
 
         fmt = self.plate_format.upper()
         if fmt == "PAKISTAN":

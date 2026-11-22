@@ -283,6 +283,10 @@ class VehicleALPRPipeline:
             f"[PROCESS] Starting processing (Resolution: {width}x{height}, FPS: {fps:.1f}, "
             f"Frames: {total_video_frames}, Duration: {expected_duration:.2f}s)..."
         )
+        print(
+            f"[TRACKER CONFIG] Box Smoothing: {self.config.box_smoothing_factor} "
+            f"(ALPR / Snapshot: Raw Detector Box), HUD Smoothing: {self.config.hud_box_smoothing_factor}"
+        )
         pipeline_wall_start = time.perf_counter()
 
         try:
@@ -379,9 +383,10 @@ class VehicleALPRPipeline:
                             alpr_crops_run_count += len(unresolved_tracks)
                             h_f, w_f = frame.shape[:2]
                             for t in unresolved_tracks:
-                                if t.smoothed_box is None:
+                                box_to_crop = t.raw_box if t.raw_box is not None else t.smoothed_box
+                                if box_to_crop is None:
                                     continue
-                                x1, y1, x2, y2 = [int(v) for v in t.smoothed_box]
+                                x1, y1, x2, y2 = [int(v) for v in box_to_crop]
                                 # 8% padding around vehicle crop to ensure bumper/plate is never clipped
                                 pad_x = int((x2 - x1) * 0.08)
                                 pad_y = int((y2 - y1) * 0.08)
@@ -420,11 +425,25 @@ class VehicleALPRPipeline:
                                         px2, py2 = min(v_crop.shape[1], spx2), min(v_crop.shape[0], spy2)
                                         plate_crop = v_crop[py1:py2, px1:px2].copy()
 
-                                        ocr_conf = (
-                                            float(np.mean(item.ocr.confidence))
-                                            if isinstance(item.ocr.confidence, (list, tuple, np.ndarray))
-                                            else float(item.ocr.confidence)
-                                        )
+                                        plate_w = max(1, px2 - px1)
+                                        plate_h = max(1, py2 - py1)
+
+                                        # Check if plate box in frame coordinates is fully inside raw vehicle box for 1.5x score bonus
+                                        pfx1 = cx1 + px1
+                                        pfy1 = cy1 + py1
+                                        pfx2 = cx1 + px2
+                                        pfy2 = cy1 + py2
+                                        if t.raw_box is not None and t.current_frame_candidate is not None:
+                                            rx1, ry1, rx2, ry2 = t.raw_box
+                                            if (pfx1 >= rx1 - 5) and (pfy1 >= ry1 - 5) and (pfx2 <= rx2 + 5) and (pfy2 <= ry2 + 5):
+                                                t.current_frame_candidate["plate_inside"] = True
+
+                                        if isinstance(item.ocr.confidence, (list, tuple, np.ndarray)):
+                                            per_char_confs = [float(c) for c in item.ocr.confidence]
+                                            ocr_conf = float(np.mean(per_char_confs)) if per_char_confs else 0.0
+                                        else:
+                                            ocr_conf = float(item.ocr.confidence)
+                                            per_char_confs = [ocr_conf] * len(str(item.ocr.text))
 
                                         self.tracker_manager.update_track_plate(
                                             track_id=t.track_id,
@@ -433,6 +452,10 @@ class VehicleALPRPipeline:
                                             det_conf=float(item.detection.confidence),
                                             plate_crop=plate_crop,
                                             frame=frame,
+                                            per_char_confs=per_char_confs,
+                                            plate_w=plate_w,
+                                            plate_h=plate_h,
+                                            frame_idx=frame_idx,
                                         )
                         else:
                             # -------------------------------------------------
@@ -622,6 +645,16 @@ class VehicleALPRPipeline:
         # ---------------------------------------------------------
         # 12. Detected Plates List & Ground Truth Benchmark Evaluation
         # ---------------------------------------------------------
+        total_events = len(self.tracker_manager.emitted_events)
+        partial_events_count = sum(
+            1 for e in self.tracker_manager.emitted_events
+            if e.get("number_plate") and "?" in str(e.get("number_plate"))
+        )
+        plate_reads_count = 0
+        if self.config.plate_reads_jsonl_path.exists():
+            with open(self.config.plate_reads_jsonl_path, "r", encoding="utf-8") as pf:
+                plate_reads_count = sum(1 for line in pf if line.strip())
+
         detected_plates_with_conf = [
             (e.get("number_plate"), e.get("number_plate_confidence"))
             for e in self.tracker_manager.emitted_events
@@ -629,8 +662,26 @@ class VehicleALPRPipeline:
         ]
 
         print("=" * 75)
-        print("                 DETECTED NUMBER PLATES")
+        print("                 EVENT & VEHICLE REPORT")
         print("=" * 75)
+        print(f"Total Number of Events:             {total_events}")
+        print(f"Events with Partial Plates ('?'):   {partial_events_count}")
+        print(f"Lines in plate_reads.jsonl:         {plate_reads_count}")
+        print("-" * 75)
+        print("Event Details (Requirement F):")
+        if self.tracker_manager.emitted_events_meta:
+            for m in self.tracker_manager.emitted_events_meta:
+                complete_str = "YES" if m["is_complete"] else "NO"
+                plate_str = f"'{m['plate_text']}'" if m["plate_text"] else "NO PLATE"
+                conf_str = f"(Conf: {m['plate_conf'] * 100:.1f}%)" if m.get("plate_conf") else ""
+                print(
+                    f"  Event: {m['event_id']:<18} | Merged Tracks: {str(m['merged_track_ids']):<10} | "
+                    f"Snapshot Frame: {m['snapshot_frame_idx']:<4} | Complete: {complete_str:<3} | Plate: {plate_str:<12} {conf_str}"
+                )
+        else:
+            print("  (No events emitted)")
+        print("-" * 75)
+        print("List of Number Plates:")
         if detected_plates_with_conf:
             for p_text, p_conf in detected_plates_with_conf:
                 c_str = f"(Confidence: {p_conf * 100:.1f}%)" if p_conf is not None else ""
@@ -683,7 +734,10 @@ class VehicleALPRPipeline:
             if not track.entered_readable_zone and track.best_plate_text is None:
                 continue
 
-            x1, y1, x2, y2 = [int(v) for v in track.smoothed_box]
+            box_to_draw = track.hud_smoothed_box or track.smoothed_box
+            if box_to_draw is None:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in box_to_draw]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
 

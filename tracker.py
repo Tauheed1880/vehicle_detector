@@ -282,8 +282,52 @@ def normalize_uk_plate_syntax(plate: str) -> str:
     return "".join(chars)
 
 
+def is_fuzzy_duplicate_plate(p1: str, p2: str, max_distance: int = 2) -> bool:
+    """
+    Compares two plates ignoring '?' positions.
+    Only suppresses if BOTH plates have >= 5 known (non-'?') characters.
+    """
+    known1 = [c for c in p1 if c != "?"]
+    known2 = [c for c in p2 if c != "?"]
+    if len(known1) < 5 or len(known2) < 5:
+        return False
+
+    # If same length, compare position-by-position ignoring '?' positions
+    if len(p1) == len(p2):
+        mismatches = 0
+        for c1, c2 in zip(p1, p2):
+            if c1 != "?" and c2 != "?" and c1 != c2:
+                mismatches += 1
+                if mismatches > max_distance:
+                    return False
+        return True
+
+    # If length difference exceeds max_distance, cannot match
+    if abs(len(p1) - len(p2)) > max_distance:
+        return False
+
+    # Levenshtein distance where '?' has zero substitution/match cost
+    dp = [[0] * (len(p2) + 1) for _ in range(len(p1) + 1)]
+    for i in range(len(p1) + 1):
+        dp[i][0] = i
+    for j in range(len(p2) + 1):
+        dp[0][j] = j
+
+    for i in range(1, len(p1) + 1):
+        for j in range(1, len(p2) + 1):
+            c1, c2 = p1[i - 1], p2[j - 1]
+            cost = 0 if (c1 == "?" or c2 == "?" or c1 == c2) else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,       # deletion
+                dp[i][j - 1] + 1,       # insertion
+                dp[i - 1][j - 1] + cost # match/sub
+            )
+
+    return dp[len(p1)][len(p2)] <= max_distance
+
+
 def character_level_voting(
-    readings: List[Tuple[str, float]],
+    readings: List[Tuple],
     min_length: int = 4,
     regex_pattern: Optional[str] = None,
     uk_syntax_correction: bool = False,
@@ -293,34 +337,52 @@ def character_level_voting(
     """
     Performs confidence-squared ($conf^2$) weighted character voting across multiple plate readings.
     High confidence reads dominate, eliminating flickering run-to-run discrepancies.
-    Supports Pakistani, UK, and General plate syntax.
+    Positions where the winning character's share of position weight < 0.5 or average
+    per-character confidence < 0.5 are replaced with '?'.
+    Final text may contain '?'. Length is decided by majority length vote.
     """
     if not readings:
         return None
 
-    valid_readings: List[Tuple[str, float]] = []
+    valid_readings: List[Tuple[str, float, List[float]]] = []
     regex = re.compile(regex_pattern) if regex_pattern else None
 
-    for text, conf in readings:
-        clean_text = re.sub(r"[^A-Z0-9]", "", text.upper())
+    for item in readings:
+        if len(item) >= 3:
+            text = str(item[0])
+            conf = float(item[1])
+            char_confs_in = [float(c) for c in item[2]] if item[2] else [conf] * len(text)
+        else:
+            text = str(item[0])
+            conf = float(item[1])
+            char_confs_in = [conf] * len(text)
+
+        clean_chars = []
+        clean_confs = []
+        for ch, c_conf in zip(text.upper(), char_confs_in):
+            if ch.isalnum():
+                clean_chars.append(ch)
+                clean_confs.append(float(c_conf))
+
+        clean_text = "".join(clean_chars)
         if plate_format == "UK" and uk_syntax_correction and len(clean_text) == 7:
             clean_text = normalize_uk_plate_syntax(clean_text)
         elif plate_format == "PAKISTAN":
             if syntax_correction:
                 clean_text = normalize_pakistan_plate_syntax(clean_text)
 
-        if len(clean_text) < min_length:
+        # Allow partial reads as long as they have at least 3 characters
+        if len(clean_text) < 3:
             continue
-        if regex and not regex.match(clean_text):
-            continue
-        valid_readings.append((clean_text, conf))
+
+        valid_readings.append((clean_text, conf, clean_confs))
 
     if not valid_readings:
         return None
 
     # Group by length to find majority plate length
     length_votes = defaultdict(float)
-    for text, conf in valid_readings:
+    for text, conf, _ in valid_readings:
         length_votes[len(text)] += (conf ** 2)
 
     best_len = max(length_votes.keys(), key=lambda l: length_votes[l])
@@ -334,26 +396,45 @@ def character_level_voting(
         # Extra priority for leading area code letters (pos 0 and 1)
         pos_multiplier = 1.35 if pos in (0, 1) else 1.0
 
-        for text, conf in same_len_readings:
+        for text, conf, p_confs in same_len_readings:
             char = text[pos]
             weight = (conf ** 2) * pos_multiplier
             pos_votes[char] += weight
 
-        best_char = max(pos_votes.keys(), key=lambda c: pos_votes[c])
-        consensus_chars.append(best_char)
-
         total_weight = sum(pos_votes.values())
+        best_char = max(pos_votes.keys(), key=lambda c: pos_votes[c])
         winning_weight = pos_votes[best_char]
-        char_confs.append(min(1.0, math.sqrt(winning_weight / max(1e-5, total_weight))))
+
+        # 1. Winning character's share of position weight
+        share = winning_weight / max(1e-5, total_weight)
+
+        # 2. Average per-character confidence of winning character at this position
+        matching_char_confs = [
+            (p_confs[pos] if pos < len(p_confs) else conf)
+            for text, conf, p_confs in same_len_readings
+            if text[pos] == best_char
+        ]
+        avg_char_conf = float(np.mean(matching_char_confs)) if matching_char_confs else 0.0
+
+        # Replace position with '?' when share < 0.5 or average per-character confidence < 0.5
+        if share < 0.5 or avg_char_conf < 0.5:
+            final_char = "?"
+            char_confs.append(avg_char_conf)
+        else:
+            final_char = best_char
+            char_confs.append(avg_char_conf)
+
+        consensus_chars.append(final_char)
 
     raw_consensus = "".join(consensus_chars)
-    if plate_format == "UK" and uk_syntax_correction and len(raw_consensus) == 7:
+    if plate_format == "UK" and uk_syntax_correction and len(raw_consensus) == 7 and "?" not in raw_consensus:
         raw_consensus = normalize_uk_plate_syntax(raw_consensus)
     elif plate_format == "PAKISTAN":
-        if syntax_correction:
+        if syntax_correction and "?" not in raw_consensus:
             raw_consensus = normalize_pakistan_plate_syntax(raw_consensus)
 
-    avg_confidence = float(np.mean(char_confs)) if char_confs else float(same_len_readings[0][1])
+    known_confs = [c for ch, c in zip(consensus_chars, char_confs) if ch != "?"]
+    avg_confidence = float(np.mean(known_confs)) if known_confs else (float(np.mean(char_confs)) if char_confs else float(same_len_readings[0][1]))
     return raw_consensus, avg_confidence
 
 
@@ -367,17 +448,40 @@ class TrackState:
     disappeared_count: int = 0
     # Smoothed bounding box [x1, y1, x2, y2]
     smoothed_box: Optional[List[float]] = None
+    hud_smoothed_box: Optional[List[float]] = None
+    raw_box: Optional[List[float]] = None
+    first_raw_box: Optional[List[float]] = None
+    last_raw_box: Optional[List[float]] = None
+    frame_boxes: Dict[int, List[float]] = field(default_factory=dict)
     # Previous box center for spatial jump tracking
     last_center: Optional[Tuple[float, float]] = None
     # Best vehicle snapshot data
+    best_raw_box: Optional[List[float]] = None
     best_vehicle_box: Optional[List[int]] = None
     best_full_frame: Optional[np.ndarray] = None
     best_vehicle_crop: Optional[np.ndarray] = None
     best_vehicle_area: float = 0.0
+    # Snapshot scoring metrics (Requirement C)
+    max_sharpness: float = 0.0
+    best_unnorm_score: float = -1.0
+    best_snapshot_score: float = -1.0
+    best_snapshot_frame_idx: int = -1
+    best_snapshot_complete: bool = False
+    best_snapshot_sharp: float = 0.0
+    has_complete_frame: bool = False
+    max_vehicle_area: float = 0.0
+    current_frame_candidate: Optional[dict] = None
+    # Track stitching (Requirement A)
+    merged_track_ids: List[int] = field(default_factory=list)
+    stitched_into: Optional[int] = None
     # Readable Zone Gate
     entered_readable_zone: bool = False
-    # Plate readings history: list of (text, confidence) for consensus voting
-    plate_readings: List[Tuple[str, float]] = field(default_factory=list)
+    # Plate readings history: list of (text, mean_conf, per_char_confs, plate_w, plate_h, frame_idx)
+    plate_readings: List[Tuple] = field(default_factory=list)
+    # OCR Data collection for fine-tuning
+    all_plate_reads: List[dict] = field(default_factory=list)
+    emitted_event_id: Optional[str] = None
+    plate_reads_flushed: bool = False
     # Best plate snapshot & OCR data
     best_plate_crop: Optional[np.ndarray] = None
     best_plate_text: Optional[str] = None
@@ -393,6 +497,7 @@ class VehicleTrackerManager:
         self.config = config
         self.tracks: Dict[int, TrackState] = {}
         self.emitted_events: List[dict] = []
+        self.emitted_events_meta: List[dict] = []
         self.emitted_track_ids: Set[int] = set()
         self.recent_emitted_plates: Dict[str, Tuple[float, str]] = {}
         self.event_counter: int = 0
@@ -411,6 +516,14 @@ class VehicleTrackerManager:
         self.total_with_plate: int = 0
         self.total_without_plate: int = 0
         self.total_filtered_too_small: int = 0
+
+        # Clean output jsonl files for this run
+        if self.config.events_jsonl_path.exists():
+            with open(self.config.events_jsonl_path, "w", encoding="utf-8") as _:
+                pass
+        if self.config.collect_plate_data and self.config.plate_reads_jsonl_path.exists():
+            with open(self.config.plate_reads_jsonl_path, "w", encoding="utf-8") as _:
+                pass
 
     def register_stage2_handler(self, handler: Stage2EventInterface) -> None:
         """Registers a downstream Stage 2 analyzer callback."""
@@ -444,30 +557,51 @@ class VehicleTrackerManager:
         """
         Updates an existing track or initializes a new track state.
         Detects spatial jumps (ID switches) and enforces the readable zone gate.
+        Computes per-frame snapshot candidate using raw detector boxes (Requirement C).
         """
-        x1, y1, x2, y2 = [int(v) for v in box]
+        raw_box = [float(v) for v in box]
+        rx1, ry1, rx2, ry2 = raw_box
         h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        bw, bh = max(0, x2 - x1), max(0, y2 - y1)
-        area = float(bw * bh)
-        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
-        in_roi = self.is_in_roi([float(x1), float(y1), float(x2), float(y2)], (h, w))
+        cx1 = max(0.0, min(float(w), rx1))
+        cy1 = max(0.0, min(float(h), ry1))
+        cx2 = max(0.0, min(float(w), rx2))
+        cy2 = max(0.0, min(float(h), ry2))
+
+        raw_bw = max(0.0, rx2 - rx1)
+        raw_bh = max(0.0, ry2 - ry1)
+        raw_area = float(raw_bw * raw_bh)
+
+        inside_bw = max(0.0, cx2 - cx1)
+        inside_bh = max(0.0, cy2 - cy1)
+        inside_area = float(inside_bw * inside_bh)
+
+        inside = inside_area / max(1e-5, raw_area)
+        complete = bool((inside >= 0.97) and (rx1 >= 12.0) and (ry1 >= 12.0) and (rx2 <= float(w) - 12.0) and (ry2 <= float(h) - 12.0))
+
+        # Vehicle crop with 6% padding clamped to frame (clean, no boxes/labels)
+        pad_x = int(raw_bw * 0.06)
+        pad_y = int(raw_bh * 0.06)
+        vx1 = max(0, int(rx1 - pad_x))
+        vy1 = max(0, int(ry1 - pad_y))
+        vx2 = min(w, int(rx2 + pad_x))
+        vy2 = min(h, int(ry2 + pad_y))
+        vehicle_crop = frame[vy1:vy2, vx1:vx2].copy() if (vx2 > vx1 and vy2 > vy1) else None
+
+        raw_sharp = get_image_sharpness(vehicle_crop) if vehicle_crop is not None else 0.0
+        area_px = inside_area
+        score_multiplier = 1.0 if complete else 0.35
+        base_score = area_px * raw_sharp * score_multiplier
+
+        cx, cy = (rx1 + rx2) / 2.0, (ry1 + ry2) / 2.0
+        in_roi = self.is_in_roi([float(cx1), float(cy1), float(cx2), float(cy2)], (h, w))
         is_readable_size = (
-            bw >= self.config.min_vehicle_width
-            and bh >= self.config.min_vehicle_height
-            and area >= self.config.min_readable_vehicle_area
+            raw_bw >= self.config.min_vehicle_width
+            and raw_bh >= self.config.min_vehicle_height
+            and raw_area >= self.config.min_readable_vehicle_area
         )
 
         global_id = f"{self.config.camera_id}:{track_id}"
-
-        # Crop vehicle with 5% padding
-        pad_x = int(bw * 0.05)
-        pad_y = int(bh * 0.05)
-        vx1, vy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-        vx2, vy2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-        vehicle_crop = frame[vy1:vy2, vx1:vx2].copy() if area > 0 else None
 
         if track_id not in self.tracks:
             track = TrackState(
@@ -477,19 +611,29 @@ class VehicleTrackerManager:
                 last_frame_idx=frame_idx,
                 frames_tracked=1,
                 disappeared_count=0,
-                smoothed_box=[float(x1), float(y1), float(x2), float(y2)],
+                smoothed_box=[rx1, ry1, rx2, ry2],
+                hud_smoothed_box=[rx1, ry1, rx2, ry2],
+                raw_box=raw_box,
+                first_raw_box=raw_box,
+                last_raw_box=raw_box,
+                frame_boxes={frame_idx: raw_box},
                 last_center=(cx, cy),
-                best_vehicle_box=[x1, y1, x2, y2],
-                best_full_frame=frame.copy() if area > 0 else None,
+                best_raw_box=raw_box,
+                best_vehicle_box=[int(rx1), int(ry1), int(rx2), int(ry2)],
+                best_full_frame=frame.copy() if raw_area > 0 else None,
                 best_vehicle_crop=vehicle_crop,
-                best_vehicle_area=area,
+                best_vehicle_area=raw_area,
+                max_vehicle_area=raw_area,
+                has_complete_frame=complete,
+                max_sharpness=raw_sharp,
+                merged_track_ids=[track_id],
                 entered_readable_zone=(in_roi and is_readable_size),
             )
             self.tracks[track_id] = track
         else:
             track = self.tracks[track_id]
 
-            # Spatial Jump Check: Detect ID switches / tracker teleportation
+            # Spatial Jump Check
             if track.last_center is not None and track.frames_tracked > 2:
                 prev_cx, prev_cy = track.last_center
                 jump_dist = math.hypot(cx - prev_cx, cy - prev_cy)
@@ -498,33 +642,83 @@ class VehicleTrackerManager:
                     track.best_plate_text = None
                     track.best_plate_conf = None
                     track.plate_confident_reached = False
-                    track.best_vehicle_area = area
 
             track.last_center = (cx, cy)
             track.last_frame_idx = frame_idx
             track.frames_tracked += 1
             track.disappeared_count = 0
+            track.raw_box = raw_box
+            track.last_raw_box = raw_box
+            track.frame_boxes[frame_idx] = raw_box
+            if complete:
+                track.has_complete_frame = True
+            track.max_vehicle_area = max(track.max_vehicle_area, raw_area)
+            track.max_sharpness = max(track.max_sharpness, raw_sharp)
 
             if in_roi and is_readable_size:
                 track.entered_readable_zone = True
 
+            # Smoothed box with box_smoothing_factor (0.0 for raw box / zero lag)
             alpha = self.config.box_smoothing_factor
-            if track.smoothed_box is not None:
+            if alpha == 0.0 or track.smoothed_box is None:
+                track.smoothed_box = [rx1, ry1, rx2, ry2]
+            else:
                 track.smoothed_box = [
                     alpha * float(c) + (1.0 - alpha) * float(s)
-                    for c, s in zip([x1, y1, x2, y2], track.smoothed_box)
+                    for c, s in zip(raw_box, track.smoothed_box)
                 ]
+
+            # HUD smoothing for visualization display
+            hud_alpha = getattr(self.config, "hud_box_smoothing_factor", 0.65)
+            if track.hud_smoothed_box is None:
+                track.hud_smoothed_box = [rx1, ry1, rx2, ry2]
             else:
-                track.smoothed_box = [float(x1), float(y1), float(x2), float(y2)]
+                track.hud_smoothed_box = [
+                    hud_alpha * float(c) + (1.0 - hud_alpha) * float(s)
+                    for c, s in zip(raw_box, track.hud_smoothed_box)
+                ]
 
-            if area > track.best_vehicle_area and area > 0:
-                track.best_vehicle_area = area
-                track.best_vehicle_box = [x1, y1, x2, y2]
-                if not track.has_event_emitted:
-                    track.best_full_frame = frame.copy()
-                    track.best_vehicle_crop = vehicle_crop
+        # Stage candidate for commit after ALPR evaluation in this frame
+        track.current_frame_candidate = {
+            "frame_idx": frame_idx,
+            "raw_box": raw_box,
+            "full_frame": frame,
+            "vehicle_crop": vehicle_crop,
+            "raw_sharp": raw_sharp,
+            "base_score": base_score,
+            "complete": complete,
+            "area_px": area_px,
+            "plate_inside": False,
+        }
 
-        return self.tracks[track_id]
+        return track
+
+    def commit_frame_snapshots(self) -> None:
+        """
+        Commits per-frame snapshot scores across all active tracks.
+        Applies 1.5x plate bonus if a plate was detected inside the vehicle box (Requirement C).
+        """
+        for track in self.tracks.values():
+            cand = track.current_frame_candidate
+            if cand is None:
+                continue
+
+            bonus = 1.5 if cand.get("plate_inside", False) else 1.0
+            unnorm_score = cand["base_score"] * bonus
+            track.max_sharpness = max(track.max_sharpness, cand["raw_sharp"])
+
+            if unnorm_score > track.best_unnorm_score or track.best_full_frame is None:
+                track.best_unnorm_score = unnorm_score
+                track.best_snapshot_score = unnorm_score / max(1e-5, track.max_sharpness)
+                track.best_full_frame = cand["full_frame"].copy()
+                track.best_raw_box = cand["raw_box"]
+                track.best_vehicle_box = [int(v) for v in cand["raw_box"]]
+                track.best_vehicle_crop = cand["vehicle_crop"]
+                track.best_snapshot_frame_idx = cand["frame_idx"]
+                track.best_snapshot_complete = cand["complete"]
+                track.best_snapshot_sharp = cand["raw_sharp"]
+
+            track.current_frame_candidate = None
 
     def mark_disappeared_tracks(self, active_track_ids: set[int]) -> None:
         """Increments disappeared count for tracks absent from current frame."""
@@ -540,23 +734,40 @@ class VehicleTrackerManager:
         det_conf: float,
         plate_crop: np.ndarray,
         frame: np.ndarray,
+        per_char_confs: Optional[List[float]] = None,
+        plate_w: int = 0,
+        plate_h: int = 0,
+        frame_idx: int = 0,
     ) -> None:
         """
-        Directly associates a plate prediction (from vehicle crop or full frame) to a track.
-        Enforces plate mutability lock (prevents ID 19 plate jump) and consensus voting.
+        Directly associates a plate prediction to a track.
+        Enforces plate mutability lock and consensus voting.
+        NOTE: Vehicle snapshots are governed strictly by snapshot scoring (Requirement C).
         """
         track = self.tracks.get(track_id)
         if track is None or track.has_event_emitted:
             return
 
-        clean_text = re.sub(r"[^A-Z0-9]", "", str(raw_text).strip().upper())
+        raw_str = str(raw_text).strip().upper()
+        if per_char_confs is None or len(per_char_confs) != len(raw_str):
+            per_char_confs = [ocr_conf] * len(raw_str)
+
+        clean_chars = []
+        clean_confs = []
+        for ch, c_conf in zip(raw_str, per_char_confs):
+            if ch.isalnum():
+                clean_chars.append(ch)
+                clean_confs.append(float(c_conf))
+
+        clean_text = "".join(clean_chars)
         if self.config.plate_format == "UK" and self.config.uk_syntax_correction and len(clean_text) == 7:
             clean_text = normalize_uk_plate_syntax(clean_text)
         elif self.config.plate_format == "PAKISTAN":
             if self.config.plate_syntax_correction:
                 clean_text = normalize_pakistan_plate_syntax(clean_text)
 
-        if len(clean_text) < self.config.min_plate_length:
+        min_len_req = min(self.config.min_plate_length, self.config.min_known_chars)
+        if len(clean_text) < min_len_req:
             return
 
         # Plate Mutability Lock: Do not let a conflicting plate overwrite established text
@@ -569,15 +780,30 @@ class VehicleTrackerManager:
         if sharpness < self.config.min_plate_sharpness and track.best_plate_crop is not None:
             return
 
-        track.plate_readings.append((clean_text, ocr_conf))
+        actual_plate_w = plate_w if plate_w > 0 else (plate_crop.shape[1] if plate_crop is not None else 0)
+        actual_plate_h = plate_h if plate_h > 0 else (plate_crop.shape[0] if plate_crop is not None else 0)
+
+        # Store each read as (text, mean_conf, per_char_confs, plate_w, plate_h, frame_idx)
+        read_entry = (clean_text, ocr_conf, clean_confs, actual_plate_w, actual_plate_h, frame_idx)
+        track.plate_readings.append(read_entry)
+
+        if self.config.collect_plate_data:
+            score = float(ocr_conf) * float(actual_plate_w)
+            track.all_plate_reads.append({
+                "frame_idx": frame_idx,
+                "raw_text": clean_text,
+                "per_character_confidences": [round(float(c), 4) for c in clean_confs],
+                "plate_w": int(actual_plate_w),
+                "plate_h": int(actual_plate_h),
+                "crop": plate_crop.copy() if plate_crop is not None else None,
+                "score": score,
+                "crop_file_name": None,
+            })
 
         is_better = (track.best_plate_conf is None) or (ocr_conf > track.best_plate_conf)
         if is_better:
             track.best_plate_crop = plate_crop.copy() if plate_crop is not None else None
             track.best_plate_det_conf = det_conf
-            track.best_full_frame = frame.copy()
-            if track.smoothed_box is not None:
-                track.best_vehicle_box = [int(v) for v in track.smoothed_box]
 
         consensus_result = character_level_voting(
             readings=track.plate_readings,
@@ -594,7 +820,9 @@ class VehicleTrackerManager:
             track.best_plate_conf = voted_conf
 
             if (
-                voted_conf >= self.config.min_confident_plate_conf
+                "?" not in voted_text
+                and len(voted_text) >= self.config.min_plate_length
+                and voted_conf >= self.config.min_confident_plate_conf
                 and len(track.plate_readings) >= self.config.min_plate_reads_for_event
             ):
                 track.plate_confident_reached = True
@@ -636,12 +864,16 @@ class VehicleTrackerManager:
                 c_px1, c_py1 = max(0, int(px1)), max(0, int(py1))
                 c_px2, c_py2 = min(w, int(px2)), min(h, int(py2))
                 plate_crop = frame[c_py1:c_py2, c_px1:c_px2].copy()
+                plate_w = max(1, c_px2 - c_px1)
+                plate_h = max(1, c_py2 - c_py1)
 
-                ocr_conf = (
-                    float(np.mean(ocr.confidence))
-                    if isinstance(ocr.confidence, (list, tuple, np.ndarray))
-                    else float(ocr.confidence)
-                )
+                if isinstance(ocr.confidence, (list, tuple, np.ndarray)):
+                    per_char_confs = [float(c) for c in ocr.confidence]
+                    ocr_conf = float(np.mean(per_char_confs)) if per_char_confs else 0.0
+                else:
+                    ocr_conf = float(ocr.confidence)
+                    per_char_confs = [ocr_conf] * len(str(ocr.text))
+
                 self.update_track_plate(
                     track_id=best_match_id,
                     raw_text=str(ocr.text),
@@ -649,51 +881,305 @@ class VehicleTrackerManager:
                     det_conf=float(det.confidence),
                     plate_crop=plate_crop,
                     frame=frame,
+                    per_char_confs=per_char_confs,
+                    plate_w=plate_w,
+                    plate_h=plate_h,
+                    frame_idx=frame_idx,
                 )
+
+                # Check if plate is fully inside raw vehicle box for 1.5x score bonus
+                matched_track = self.tracks.get(best_match_id)
+                if matched_track and matched_track.current_frame_candidate:
+                    rb = matched_track.raw_box
+                    if rb is not None:
+                        rx1, ry1, rx2, ry2 = rb
+                        if (c_px1 >= rx1 - 5) and (c_py1 >= ry1 - 5) and (c_px2 <= rx2 + 5) and (c_py2 <= ry2 + 5):
+                            matched_track.current_frame_candidate["plate_inside"] = True
+
+    def _boxes_overlap_match(self, b1: Optional[List[float]], b2: Optional[List[float]]) -> bool:
+        """Computes IoU and containment between two boxes."""
+        if b1 is None or b2 is None:
+            return False
+        x1 = max(b1[0], b2[0])
+        y1 = max(b1[1], b2[1])
+        x2 = min(b1[2], b2[2])
+        y2 = min(b1[3], b2[3])
+        iw = max(0.0, x2 - x1)
+        ih = max(0.0, y2 - y1)
+        inter = iw * ih
+        area1 = max(0.0, (b1[2] - b1[0]) * (b1[3] - b1[1]))
+        area2 = max(0.0, (b2[2] - b2[0]) * (b2[3] - b2[1]))
+        if area1 <= 0 or area2 <= 0:
+            return False
+        union = area1 + area2 - inter
+        iou = inter / union if union > 0 else 0.0
+        containment = max(inter / area1, inter / area2)
+        return (iou > 0.25) or (containment > 0.60)
+
+    def can_stitch_tracks(self, t1: TrackState, t2: TrackState) -> bool:
+        """
+        Evaluates whether two tracks represent the same vehicle (Requirement A):
+        1. Time overlap: active at same time, or start within 20 frames of other's last frame.
+        2. Confident plate check: levenshtein <= 2 if both have confident plates.
+        3. Box overlap: IoU > 0.25 or containment > 0.60.
+        """
+        # 1. Time overlap / proximity check
+        time_overlap = False
+        if max(t1.first_frame_idx, t2.first_frame_idx) <= min(t1.last_frame_idx, t2.last_frame_idx):
+            time_overlap = True
+        elif 0 <= t2.first_frame_idx - t1.last_frame_idx <= 20:
+            time_overlap = True
+        elif 0 <= t1.first_frame_idx - t2.last_frame_idx <= 20:
+            time_overlap = True
+
+        if not time_overlap:
+            return False
+
+        # 2. Confident plate consistency check
+        has_conf1 = t1.plate_confident_reached and t1.best_plate_text
+        has_conf2 = t2.plate_confident_reached and t2.best_plate_text
+        if has_conf1 and has_conf2:
+            dist = levenshtein_distance(t1.best_plate_text, t2.best_plate_text)
+            if dist > 2:
+                return False
+
+        # 3. Box overlap check (IoU > 0.25 or containment > 0.60)
+        common_frames = set(t1.frame_boxes.keys()) & set(t2.frame_boxes.keys())
+        for f in common_frames:
+            if self._boxes_overlap_match(t1.frame_boxes[f], t2.frame_boxes[f]):
+                return True
+
+        if t1.last_frame_idx <= t2.first_frame_idx and t1.last_raw_box and t2.first_raw_box:
+            if self._boxes_overlap_match(t1.last_raw_box, t2.first_raw_box):
+                return True
+        elif t2.last_frame_idx <= t1.first_frame_idx and t2.last_raw_box and t1.first_raw_box:
+            if self._boxes_overlap_match(t2.last_raw_box, t1.first_raw_box):
+                return True
+
+        if self._boxes_overlap_match(t1.best_raw_box, t2.best_raw_box):
+            return True
+        b1 = t1.last_raw_box or t1.best_raw_box
+        b2 = t2.last_raw_box or t2.best_raw_box
+        if self._boxes_overlap_match(b1, b2):
+            return True
+
+        return False
+
+    def merge_tracks(self, survivor: TrackState, absorbed: TrackState) -> None:
+        """
+        Merges 'absorbed' into 'survivor' track:
+        Combines merged track IDs, plate readings, and selects the highest scoring snapshot.
+        """
+        for tid in absorbed.merged_track_ids:
+            if tid not in survivor.merged_track_ids:
+                survivor.merged_track_ids.append(tid)
+
+        survivor.first_frame_idx = min(survivor.first_frame_idx, absorbed.first_frame_idx)
+        survivor.last_frame_idx = max(survivor.last_frame_idx, absorbed.last_frame_idx)
+        survivor.frames_tracked += absorbed.frames_tracked
+        survivor.has_complete_frame = survivor.has_complete_frame or absorbed.has_complete_frame
+        survivor.max_vehicle_area = max(survivor.max_vehicle_area, absorbed.max_vehicle_area)
+
+        for f, b in absorbed.frame_boxes.items():
+            if f not in survivor.frame_boxes:
+                survivor.frame_boxes[f] = b
+
+        survivor.plate_readings.extend(absorbed.plate_readings)
+        survivor.all_plate_reads.extend(absorbed.all_plate_reads)
+
+        if absorbed.best_plate_crop is not None:
+            if (
+                survivor.best_plate_crop is None
+                or (absorbed.best_plate_conf or 0.0) > (survivor.best_plate_conf or 0.0)
+            ):
+                survivor.best_plate_crop = absorbed.best_plate_crop
+                survivor.best_plate_det_conf = absorbed.best_plate_det_conf
+
+        consensus_res = character_level_voting(
+            readings=survivor.plate_readings,
+            min_length=self.config.min_plate_length,
+            regex_pattern=self.config.plate_regex_pattern if self.config.enforce_regex else None,
+            uk_syntax_correction=self.config.uk_syntax_correction,
+            plate_format=self.config.plate_format,
+            syntax_correction=self.config.plate_syntax_correction,
+        )
+        if consensus_res is not None:
+            survivor.best_plate_text, survivor.best_plate_conf = consensus_res
+        if absorbed.plate_confident_reached or survivor.plate_confident_reached:
+            survivor.plate_confident_reached = True
+
+        # Best snapshot selection across both (Requirement C)
+        comb_max_sharp = max(survivor.max_sharpness, absorbed.max_sharpness)
+        survivor.max_sharpness = comb_max_sharp
+
+        score_surv = survivor.best_unnorm_score / max(1e-5, comb_max_sharp)
+        score_abs = absorbed.best_unnorm_score / max(1e-5, comb_max_sharp)
+
+        if score_abs > score_surv and absorbed.best_full_frame is not None:
+            survivor.best_unnorm_score = absorbed.best_unnorm_score
+            survivor.best_snapshot_score = score_abs
+            survivor.best_full_frame = absorbed.best_full_frame
+            survivor.best_raw_box = absorbed.best_raw_box
+            survivor.best_vehicle_box = absorbed.best_vehicle_box
+            survivor.best_vehicle_crop = absorbed.best_vehicle_crop
+            survivor.best_snapshot_frame_idx = absorbed.best_snapshot_frame_idx
+            survivor.best_snapshot_complete = absorbed.best_snapshot_complete
+            survivor.best_snapshot_sharp = absorbed.best_snapshot_sharp
+        else:
+            survivor.best_snapshot_score = score_surv
+
+        absorbed.stitched_into = survivor.track_id
+        absorbed.has_event_emitted = True
+
+    def try_stitch_track(self, track: TrackState) -> TrackState:
+        """
+        Attempts to stitch 'track' with any matching track.
+        Returns the surviving track (either an active track that absorbed 'track', or 'track').
+        """
+        current_track = track
+        merged_any = True
+        while merged_any:
+            merged_any = False
+            for other_id, other in list(self.tracks.items()):
+                if other_id == current_track.track_id:
+                    continue
+                if other.stitched_into is not None or other.has_event_emitted:
+                    continue
+                if other_id in current_track.merged_track_ids:
+                    continue
+
+                if self.can_stitch_tracks(current_track, other):
+                    if other.disappeared_count < self.config.max_disappeared_frames:
+                        self.merge_tracks(survivor=other, absorbed=current_track)
+                        return other
+                    else:
+                        self.merge_tracks(survivor=current_track, absorbed=other)
+                        merged_any = True
+                        break
+        return current_track
+
+    def finalize_track_plate_reads(self, track: TrackState) -> None:
+        """
+        Flushes collected OCR reads for this track to output/plate_reads.jsonl.
+        Saves up to 5 best crops (by score = confidence * plate_w) to output/plate_crops/.
+        """
+        if not self.config.collect_plate_data or track.plate_reads_flushed:
+            return
+
+        if not track.all_plate_reads:
+            track.plate_reads_flushed = True
+            return
+
+        # Sort reads by score = confidence * plate_w descending
+        sorted_reads = sorted(track.all_plate_reads, key=lambda r: r.get("score", 0.0), reverse=True)
+
+        # Top 5 crops saved
+        saved_crops_count = 0
+        for r in sorted_reads:
+            crop = r.get("crop")
+            if saved_crops_count < 5 and crop is not None and crop.size > 0:
+                prefix = track.emitted_event_id if track.emitted_event_id else f"T{track.track_id}"
+                crop_filename = f"crop_{prefix}_f{r['frame_idx']}_{saved_crops_count + 1}.png"
+                crop_path = self.config.plate_crops_dir / crop_filename
+                self.snapshot_saver.submit(crop_path, crop)
+                r["crop_file_name"] = crop_filename
+                saved_crops_count += 1
+            else:
+                r["crop_file_name"] = None
+            r["crop"] = None
+
+        # Write lines to plate_reads.jsonl
+        self.config.plate_reads_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config.plate_reads_jsonl_path, "a", encoding="utf-8") as f:
+            for r in track.all_plate_reads:
+                entry = {
+                    "event_id": track.emitted_event_id,
+                    "track_id": track.track_id,
+                    "frame_idx": r["frame_idx"],
+                    "raw_text": r["raw_text"],
+                    "per_character_confidences": r["per_character_confidences"],
+                    "plate_w": r["plate_w"],
+                    "plate_h": r["plate_h"],
+                    "crop_file_name": r.get("crop_file_name"),
+                }
+                f.write(json.dumps(entry) + "\n")
+
+        track.plate_reads_flushed = True
 
     def check_and_emit_events(
         self,
         current_frame_idx: int,
         force_all: bool = False,
     ) -> List[dict]:
-        """Evaluates active and disappeared tracks. Enforces single-event and flush criteria."""
+        """Evaluates active and disappeared tracks. Enforces stitching, fragment filter, and emission criteria."""
         emitted_now: List[dict] = []
         now_ts = datetime.now().timestamp()
 
-        for t_id, track in list(self.tracks.items()):
-            if track.has_event_emitted or (t_id in self.emitted_track_ids):
+        # Step 1: Commit frame snapshots for all active tracks in current frame
+        self.commit_frame_snapshots()
+
+        for t_id in list(self.tracks.keys()):
+            track = self.tracks.get(t_id)
+            if track is None or track.has_event_emitted or (t_id in self.emitted_track_ids) or track.stitched_into is not None:
                 continue
 
             # Distance / Zone Gate: horizon vehicles dropped without event
             if not track.entered_readable_zone:
                 if track.disappeared_count >= self.config.max_disappeared_frames or force_all:
                     self.total_filtered_too_small += 1
+                    self.finalize_track_plate_reads(track)
                     del self.tracks[t_id]
+                continue
+
+            # A track emits when it ends (disappeared or force_all at end of video)
+            is_ended = (track.disappeared_count >= self.config.max_disappeared_frames) or force_all
+            if not is_ended:
                 continue
 
             # Minimum Track Frames Filter
             if track.frames_tracked < self.config.min_track_frames:
-                if force_all or (track.disappeared_count >= self.config.max_disappeared_frames):
-                    self.total_filtered_too_small += 1
-                    del self.tracks[t_id]
+                self.total_filtered_too_small += 1
+                self.finalize_track_plate_reads(track)
+                del self.tracks[t_id]
                 continue
 
-            should_emit = False
+            # -------------------------------------------------------------
+            # A. TRACK STITCHING: Check if this track can stitch with another track
+            # -------------------------------------------------------------
+            survivor = self.try_stitch_track(track)
+            if survivor.track_id != track.track_id:
+                # 'track' was merged into an active or another track ('survivor')!
+                continue
 
-            if track.plate_confident_reached and track.best_plate_text:
-                should_emit = True
-            elif track.disappeared_count >= self.config.max_disappeared_frames:
-                should_emit = True
-            elif force_all and track.entered_readable_zone and track.frames_tracked >= self.config.min_track_frames:
-                should_emit = True
+            # 'track' is the survivor.
+            # -------------------------------------------------------------
+            # B. IGNORE FRAGMENTS:
+            # Do not emit an event for a track that never had a "complete" frame
+            # and whose max box area is below min_readable_vehicle_area * 2,
+            # unless it was stitched into another track.
+            # -------------------------------------------------------------
+            if (not track.has_complete_frame) and (track.max_vehicle_area < self.config.min_readable_vehicle_area * 2.0):
+                print(
+                    f"[DEBUG TRACKER] Dropping fragment track {track.track_id} "
+                    f"(never complete, max_area={track.max_vehicle_area:.0f} < "
+                    f"{self.config.min_readable_vehicle_area * 2.0:.0f})"
+                )
+                self.total_filtered_too_small += 1
+                self.finalize_track_plate_reads(track)
+                del self.tracks[t_id]
+                continue
 
-            if should_emit:
-                track.has_event_emitted = True
-                self.emitted_track_ids.add(t_id)
+            track.has_event_emitted = True
+            for mid in track.merged_track_ids:
+                self.emitted_track_ids.add(mid)
 
-                event = self._emit_event(track, now_ts)
-                if event is not None:
-                    emitted_now.append(event)
+            event = self._emit_event(track, now_ts)
+            if event is not None:
+                emitted_now.append(event)
+
+        if force_all:
+            for t_id, track in list(self.tracks.items()):
+                self.finalize_track_plate_reads(track)
 
         return emitted_now
 
@@ -708,46 +1194,57 @@ class VehicleTrackerManager:
         # Partial Plate Policy: Reject incomplete or invalid plate reads
         if has_plate:
             plate_candidate = track.best_plate_text
-            is_valid = False
+            known_chars = [c for c in plate_candidate if c != "?"]
+            num_known = len(known_chars)
 
-            if self.config.plate_format == "UK":
-                uk_regex = re.compile(self.config.plate_regex_pattern or r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$")
-                is_valid = bool(uk_regex.match(plate_candidate)) and len(plate_candidate) >= self.config.min_plate_length
-            elif self.config.plate_format == "PAKISTAN":
-                # Pakistani plates: 3 to 10 alphanumeric characters (e.g. ICT123, LEA185001, MNP123, FD1234)
-                has_letter = any(c.isalpha() for c in plate_candidate)
-                has_digit = any(c.isdigit() for c in plate_candidate)
-                is_valid = (
-                    len(plate_candidate) >= self.config.min_plate_length
-                    and len(plate_candidate) <= 10
-                    and (has_letter or has_digit)
-                )
-                if self.config.enforce_regex and self.config.plate_regex_pattern:
-                    pk_regex = re.compile(self.config.plate_regex_pattern)
-                    is_valid = is_valid and bool(pk_regex.match(plate_candidate))
-            else:  # GENERAL format
-                is_valid = len(plate_candidate) >= self.config.min_plate_length
-                if self.config.enforce_regex and self.config.plate_regex_pattern:
-                    gen_regex = re.compile(self.config.plate_regex_pattern)
-                    is_valid = is_valid and bool(gen_regex.match(plate_candidate))
+            if num_known < self.config.min_known_chars:
+                has_plate = False
+                track.best_plate_text = None
+                track.best_plate_conf = None
+                track.best_plate_det_conf = None
+                track.best_plate_crop = None
+            else:
+                is_valid = False
+                if self.config.plate_format == "UK":
+                    uk_regex = re.compile(self.config.plate_regex_pattern or r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$")
+                    is_valid = bool(uk_regex.match(plate_candidate)) and len(plate_candidate) >= self.config.min_plate_length
+                elif self.config.plate_format == "PAKISTAN":
+                    has_letter = any(c.isalpha() for c in plate_candidate)
+                    has_digit = any(c.isdigit() for c in plate_candidate)
+                    is_valid = (
+                        len(plate_candidate) >= self.config.min_plate_length
+                        and len(plate_candidate) <= 10
+                        and (has_letter or has_digit)
+                    )
+                    if self.config.enforce_regex and self.config.plate_regex_pattern:
+                        pk_regex = re.compile(self.config.plate_regex_pattern)
+                        is_valid = is_valid and bool(pk_regex.match(plate_candidate))
+                else:  # GENERAL format
+                    is_valid = len(plate_candidate) >= self.config.min_plate_length
+                    if self.config.enforce_regex and self.config.plate_regex_pattern:
+                        gen_regex = re.compile(self.config.plate_regex_pattern)
+                        is_valid = is_valid and bool(gen_regex.match(plate_candidate))
 
-            if not is_valid:
-                if self.config.partial_plate_policy == "drop":
-                    has_plate = False
-                    track.best_plate_text = None
-                    track.best_plate_conf = None
-                    track.best_plate_det_conf = None
-                    track.best_plate_crop = None
-                elif self.config.partial_plate_policy == "keep_low_conf":
-                    track.best_plate_conf = min(0.35, float(track.best_plate_conf or 0.35))
+                is_partial_or_invalid = ("?" in plate_candidate) or (not is_valid)
+
+                if is_partial_or_invalid:
+                    if self.config.partial_plate_policy == "drop":
+                        has_plate = False
+                        track.best_plate_text = None
+                        track.best_plate_conf = None
+                        track.best_plate_det_conf = None
+                        track.best_plate_crop = None
+                    elif self.config.partial_plate_policy == "keep_low_conf":
+                        mean_known = float(track.best_plate_conf or 0.60)
+                        track.best_plate_conf = min(0.60, mean_known)
 
         # Fuzzy Duplicate Suppression
         if has_plate:
             plate_candidate = track.best_plate_text
             for existing_plate, (last_seen_ts, prev_event_id) in list(self.recent_emitted_plates.items()):
                 if (current_timestamp - last_seen_ts) <= self.config.duplicate_plate_window_sec:
-                    dist = levenshtein_distance(plate_candidate, existing_plate)
-                    if dist <= self.config.fuzzy_plate_max_distance:
+                    if is_fuzzy_duplicate_plate(plate_candidate, existing_plate, max_distance=self.config.fuzzy_plate_max_distance):
+                        self.finalize_track_plate_reads(track)
                         return None
 
             self.recent_emitted_plates[plate_candidate] = (current_timestamp, f"EVT_{self.event_counter + 1}")
@@ -766,22 +1263,53 @@ class VehicleTrackerManager:
             now=now,
             seq_idx=self._sec_seq_counter,
         )
+        track.emitted_event_id = event_id
         if has_plate:
             self.recent_emitted_plates[track.best_plate_text] = (current_timestamp, event_id)
 
-        # Full-size vehicle snapshot with box ONLY on target vehicle
+        # Flush plate reads now that event_id is known
+        self.finalize_track_plate_reads(track)
+
+        # -------------------------------------------------------------
+        # D. TIGHT SNAPSHOT:
+        # Save snapshot_vehicle as a CLEAN crop (no drawn box, no label) of
+        # the raw box with 6% padding clamped to the frame.
+        # Save the annotated full frame separately as context_{event_id}.png (unreferenced in events.json).
+        # -------------------------------------------------------------
         vehicle_filename = f"vehicle_{event_id}.png"
         vehicle_save_path = self.config.snapshots_dir / vehicle_filename
 
-        if track.best_full_frame is not None and track.best_vehicle_box is not None:
-            full_frame_annotated = track.best_full_frame.copy()
-            h_f, w_f = full_frame_annotated.shape[:2]
-            vx1, vy1, vx2, vy2 = track.best_vehicle_box
+        if track.best_full_frame is not None and track.best_raw_box is not None:
+            h_f, w_f = track.best_full_frame.shape[:2]
+            rx1, ry1, rx2, ry2 = track.best_raw_box
+            bw = max(1.0, rx2 - rx1)
+            bh = max(1.0, ry2 - ry1)
+            pad_x = int(bw * 0.06)
+            pad_y = int(bh * 0.06)
+            cx1 = max(0, int(rx1 - pad_x))
+            cy1 = max(0, int(ry1 - pad_y))
+            cx2 = min(w_f, int(rx2 + pad_x))
+            cy2 = min(h_f, int(ry2 + pad_y))
+            clean_vehicle_crop = track.best_full_frame[cy1:cy2, cx1:cx2].copy()
+            self.snapshot_saver.submit(vehicle_save_path, clean_vehicle_crop)
+        elif track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
+            self.snapshot_saver.submit(vehicle_save_path, track.best_vehicle_crop)
+        else:
+            placeholder = np.zeros((100, 100, 3), dtype=np.uint8)
+            self.snapshot_saver.submit(vehicle_save_path, placeholder)
+
+        # Context Full Frame with Annotation
+        context_filename = f"context_{event_id}.png"
+        context_save_path = self.config.snapshots_dir / context_filename
+        if track.best_full_frame is not None and track.best_raw_box is not None:
+            annotated_context = track.best_full_frame.copy()
+            h_f, w_f = annotated_context.shape[:2]
+            vx1, vy1, vx2, vy2 = [int(v) for v in track.best_raw_box]
             vx1, vy1 = max(0, vx1), max(0, vy1)
             vx2, vy2 = min(w_f, vx2), min(h_f, vy2)
 
             box_color = (0, 255, 0) if has_plate else (0, 140, 255)
-            cv2.rectangle(full_frame_annotated, (vx1, vy1), (vx2, vy2), box_color, 3)
+            cv2.rectangle(annotated_context, (vx1, vy1), (vx2, vy2), box_color, 3)
 
             label = (
                 f"{track.global_id} | {track.best_plate_text}"
@@ -795,14 +1323,14 @@ class VehicleTrackerManager:
             (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
             label_y = max(th + 6, vy1 - 8)
             cv2.rectangle(
-                full_frame_annotated,
+                annotated_context,
                 (vx1, label_y - th - 6),
                 (vx1 + tw + 6, label_y + baseline + 2),
                 box_color,
                 -1,
             )
             cv2.putText(
-                full_frame_annotated,
+                annotated_context,
                 label,
                 (vx1 + 3, label_y),
                 font,
@@ -811,14 +1339,7 @@ class VehicleTrackerManager:
                 thickness,
                 cv2.LINE_AA,
             )
-
-            self.snapshot_saver.submit(vehicle_save_path, full_frame_annotated)
-            track.best_full_frame = None
-        elif track.best_vehicle_crop is not None and track.best_vehicle_crop.size > 0:
-            self.snapshot_saver.submit(vehicle_save_path, track.best_vehicle_crop)
-        else:
-            placeholder = np.zeros((100, 100, 3), dtype=np.uint8)
-            self.snapshot_saver.submit(vehicle_save_path, placeholder)
+            self.snapshot_saver.submit(context_save_path, annotated_context)
 
         # Cropped Plate snapshot
         plate_filename: Optional[str] = None
@@ -828,7 +1349,7 @@ class VehicleTrackerManager:
             plate_save_path = self.config.snapshots_dir / plate_filename
             self.snapshot_saver.submit(plate_save_path, track.best_plate_crop)
 
-        # JSON Event Output
+        # JSON Event Output (Schema 100% Preserved)
         event_data = {
             "event_id": event_id,
             "camera_id": self.config.camera_id,
@@ -848,6 +1369,17 @@ class VehicleTrackerManager:
                 else None
             ),
         }
+
+        # Store metadata for final report (Requirement F)
+        meta = {
+            "event_id": event_id,
+            "merged_track_ids": sorted(list(set(track.merged_track_ids))),
+            "snapshot_frame_idx": track.best_snapshot_frame_idx,
+            "is_complete": track.best_snapshot_complete,
+            "plate_text": track.best_plate_text if has_plate else None,
+            "plate_conf": round(float(track.best_plate_conf), 2) if (has_plate and track.best_plate_conf) else None,
+        }
+        self.emitted_events_meta.append(meta)
 
         if self.config.include_remarks:
             if has_plate:
