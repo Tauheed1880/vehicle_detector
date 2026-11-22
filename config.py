@@ -19,6 +19,7 @@ class PipelineConfig:
     camera_name: str = "Main Boulevard - North Entry Lane 1"
     camera_location: str = "North Gate Toll Plaza / Entry Checkpost 1"
     rtsp_url: str = ""
+    node_id: str = "A"
 
     # -------------------------------------------------------------
     # Vehicle Detector & Tracker Configuration
@@ -30,9 +31,9 @@ class PipelineConfig:
     # 3. YOLOX (Apache-2.0)
     # 4. Enterprise Commercial License from Ultralytics
     # -------------------------------------------------------------
-    vehicle_model_name: str = "yolov8n.pt"  # Lightweight nano model
-    vehicle_conf_thresh: float = 0.35       # Confidence threshold for vehicles
-    vehicle_imgsz: int = 640                # Inference image size for YOLO
+    vehicle_model_name: str = "yolo11m.pt"  # Medium YOLO11 model
+    vehicle_conf_thresh: float = 0.30       # Confidence threshold for vehicles
+    vehicle_imgsz: int = 960                # Inference image size for YOLO
     vehicle_half_precision: bool = True     # Use FP16 half precision on CUDA
     # Target COCO classes: 2=car, 3=motorcycle, 5=bus, 7=truck
     vehicle_classes: List[int] = field(default_factory=lambda: [2, 3, 5, 7])
@@ -50,29 +51,31 @@ class PipelineConfig:
     # Horizon / far-away small vehicles outside readable zone are COMPLETELY ignored
     # -------------------------------------------------------------
     enable_smart_gating: bool = True
-    min_vehicle_width: int = 80
-    min_vehicle_height: int = 65
-    min_readable_vehicle_area: float = 10000.0  # Minimum box area to be considered readable
-    # Horizon exclusion: ignore upper 32% of frame by default where cars are tiny
-    roi_top_cutoff_ratio: float = 0.32
+    min_vehicle_width: int = 40
+    min_vehicle_height: int = 35
+    min_readable_vehicle_area: float = 2500.0  # Minimum box area to be considered readable
+    # Horizon exclusion: 0.0 disables cutoff to capture far-away carriageway vehicles
+    roi_top_cutoff_ratio: float = 0.0
     # Optional ROI polygon [[x, y], ...]. If None, whole frame lower zone is used.
     roi_polygon: Optional[List[List[int]]] = None
 
     # -------------------------------------------------------------
     # FastALPR License Plate Detection & OCR Configuration
     # -------------------------------------------------------------
-    alpr_detector_model: str = "yolo-v9-t-384-license-plate-end2end"
+    alpr_detector_model: str = "yolo-v9-s-608-license-plate-end2end"
     alpr_detector_conf_thresh: float = 0.35
-    alpr_ocr_model: str = "cct-xs-v2-global-model"
+    alpr_ocr_model: str = "cct-s-v2-global-model"
     # ALPR frame interval: Run ALPR every 3 frames on unresolved readable vehicles
     alpr_frame_interval: int = 3
 
     # ALPR Mode: Run on vehicle crops (much faster) vs full frame
     alpr_on_crops: bool = True
+    alpr_crop_min_width: int = 608
 
     # Plate Format Standard: "PAKISTAN", "GENERAL", or "UK"
     plate_format: str = "PAKISTAN"
     plate_country_code: str = "PK"
+    plate_syntax_correction: bool = False
     min_plate_length: int = 4              # Pakistani plates can be 4-8 chars (e.g. ICT123, LEA185001)
     min_plate_sharpness: float = 25.0
     min_plate_reads_for_event: int = 2     # Minimum plate reads needed before declaring confident

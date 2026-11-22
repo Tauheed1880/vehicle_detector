@@ -165,13 +165,40 @@ class VehicleALPRPipeline:
                 f"[LOAD] Loading FastALPR (Detector: {self.config.alpr_detector_model}, "
                 f"OCR: {self.config.alpr_ocr_model}, Mode: {'CROPS' if self.config.alpr_on_crops else 'FULL-FRAME'})..."
             )
-            self.alpr = ALPR(
-                detector_model=self.config.alpr_detector_model,
-                detector_conf_thresh=self.config.alpr_detector_conf_thresh,
-                detector_providers=detector_providers,
-                ocr_model=self.config.alpr_ocr_model,
-                ocr_device="cuda" if self.has_cuda else "auto",
-            )
+            try:
+                self.alpr = ALPR(
+                    detector_model=self.config.alpr_detector_model,
+                    detector_conf_thresh=self.config.alpr_detector_conf_thresh,
+                    detector_providers=detector_providers,
+                    ocr_model=self.config.alpr_ocr_model,
+                    ocr_device="cuda" if self.has_cuda else "auto",
+                )
+            except Exception as e:
+                print(
+                    f"\n[LOAD WARNING] Failed to load requested models ({self.config.alpr_detector_model}, "
+                    f"{self.config.alpr_ocr_model}): {e}\n"
+                    f"[LOAD FALLBACK] Falling back to default models ('yolo-v9-t-384-license-plate-end2end', 'cct-xs-v2-global-model')...\n"
+                )
+                self.config.alpr_detector_model = "yolo-v9-t-384-license-plate-end2end"
+                self.config.alpr_ocr_model = "cct-xs-v2-global-model"
+                self.alpr = ALPR(
+                    detector_model=self.config.alpr_detector_model,
+                    detector_conf_thresh=self.config.alpr_detector_conf_thresh,
+                    detector_providers=detector_providers,
+                    ocr_model=self.config.alpr_ocr_model,
+                    ocr_device="cuda" if self.has_cuda else "auto",
+                )
+
+        # Print active models & configuration summary
+        print("\n" + "=" * 65)
+        print("                 ACTIVE PIPELINE CONFIGURATION")
+        print("=" * 65)
+        print(f"Vehicle Model:            {self.config.vehicle_model_name}")
+        print(f"Vehicle Imgsz:            {self.config.vehicle_imgsz}")
+        print(f"Plate Detector Model:     {self.config.alpr_detector_model}")
+        print(f"Plate OCR Model:          {self.config.alpr_ocr_model}")
+        print(f"Plate Syntax Correction:  {self.config.plate_syntax_correction}")
+        print("=" * 65 + "\n")
         print("[READY] All models successfully verified and loaded.")
 
     def process_video(
@@ -368,11 +395,11 @@ class VehicleALPRPipeline:
 
                                 v_crop = frame[cy1:cy2, cx1:cx2]
 
-                                # Upscale smaller vehicle crops to >= 384px width so FastALPR detector & OCR achieve peak clarity
+                                # Upscale smaller vehicle crops to >= alpr_crop_min_width width so FastALPR detector & OCR achieve peak clarity
                                 scale_factor = 1.0
-                                if crop_w < 384:
-                                    scale_factor = 384.0 / float(crop_w)
-                                    target_w = 384
+                                if crop_w < self.config.alpr_crop_min_width:
+                                    scale_factor = float(self.config.alpr_crop_min_width) / float(crop_w)
+                                    target_w = self.config.alpr_crop_min_width
                                     target_h = max(64, int(crop_h * scale_factor))
                                     v_crop_scaled = cv2.resize(v_crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
                                 else:

@@ -102,31 +102,65 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
-def int_to_alphabets(n: int) -> str:
-    """Bijective base-26 numbering (1 -> A, 2 -> B... 26 -> Z, 27 -> AA, 28 -> AB...)."""
-    res = []
-    while n > 0:
-        n, rem = divmod(n - 1, 26)
-        res.append(chr(65 + rem))
-    return "".join(reversed(res)) if res else "A"
+BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
-def get_camera_number(camera_id_str: str) -> str:
-    """Extracts numeric camera number from camera_id (e.g. 'CAM-00001' -> '1')."""
+def int_to_base36_2char(n: int) -> str:
+    """Encodes integer to 2-character base36 string ('00', '01' ... '0Z', '10' ... 'ZZ')."""
+    n = n % 1296
+    d1 = n // 36
+    d2 = n % 36
+    return BASE36_ALPHABET[d1] + BASE36_ALPHABET[d2]
+
+
+def format_camera_number_code(camera_id_str: str) -> str:
+    """
+    Extracts camera number from camera_id string:
+    - 2-digit zero-padded for 0-99 (e.g. 'CAM-00007' -> '07').
+    - 3-digit for > 99 (e.g. 'CAM-00105' -> '105').
+    """
     match = re.search(r"\d+", str(camera_id_str))
     if match:
-        cleaned = match.group(0).lstrip("0")
-        return cleaned if cleaned else "1"
-    return "1"
+        cam_int = int(match.group(0))
+        return f"{cam_int:03d}" if cam_int > 99 else f"{cam_int:02d}"
+    return "01"
 
 
-def generate_infinite_event_id(counter: int, camera_id_str: str, now: datetime) -> str:
-    """Generates unique event ID formatted as: evt_id_{yymmdd}_{camera_num}_{alpha_seq}_{random_letters}."""
-    yymmdd = now.strftime("%y%m%d")
-    cam_num = get_camera_number(camera_id_str)
-    alpha_seq = int_to_alphabets(counter)
-    rand_alpha = "".join(random.choices(string.ascii_uppercase, k=3))
-    return f"evt_id_{yymmdd}_{cam_num}_{alpha_seq}_{rand_alpha}"
+def generate_infinite_event_id(
+    node_id: str,
+    camera_id_str: str,
+    now: datetime,
+    seq_idx: int = 0,
+) -> str:
+    """
+    Generates structured enterprise event ID:
+      {NODE}{CAM}-{YYMMDD}{HHMMSS}-{SEQ}
+    Example: A07-261122054312-00
+    """
+    cam_str = format_camera_number_code(camera_id_str)
+    timestamp_str = now.strftime("%y%m%d%H%M%S")
+    seq_str = int_to_base36_2char(seq_idx)
+    return f"{node_id}{cam_str}-{timestamp_str}-{seq_str}"
+
+
+def test_event_id_uniqueness() -> bool:
+    """Verifies that 10,000 generated event IDs have zero collisions."""
+    seen_ids = set()
+    from datetime import timedelta
+    base_time = datetime(2026, 11, 22, 5, 43, 12)
+    for i in range(10000):
+        sec_offset = i // 1296
+        seq_idx = i % 1296
+        t = base_time + timedelta(seconds=sec_offset)
+        eid = generate_infinite_event_id(node_id="A", camera_id_str="CAM-00007", now=t, seq_idx=seq_idx)
+        assert eid not in seen_ids, f"Collision detected for event ID: {eid}"
+        seen_ids.add(eid)
+    assert len(seen_ids) == 10000
+    return True
+
+
+# Run verification check immediately
+assert test_event_id_uniqueness() is True
 
 
 def get_image_sharpness(img: Optional[np.ndarray]) -> float:
@@ -254,6 +288,7 @@ def character_level_voting(
     regex_pattern: Optional[str] = None,
     uk_syntax_correction: bool = False,
     plate_format: str = "PAKISTAN",
+    syntax_correction: bool = False,
 ) -> Optional[Tuple[str, float]]:
     """
     Performs confidence-squared ($conf^2$) weighted character voting across multiple plate readings.
@@ -271,7 +306,8 @@ def character_level_voting(
         if plate_format == "UK" and uk_syntax_correction and len(clean_text) == 7:
             clean_text = normalize_uk_plate_syntax(clean_text)
         elif plate_format == "PAKISTAN":
-            clean_text = normalize_pakistan_plate_syntax(clean_text)
+            if syntax_correction:
+                clean_text = normalize_pakistan_plate_syntax(clean_text)
 
         if len(clean_text) < min_length:
             continue
@@ -314,7 +350,8 @@ def character_level_voting(
     if plate_format == "UK" and uk_syntax_correction and len(raw_consensus) == 7:
         raw_consensus = normalize_uk_plate_syntax(raw_consensus)
     elif plate_format == "PAKISTAN":
-        raw_consensus = normalize_pakistan_plate_syntax(raw_consensus)
+        if syntax_correction:
+            raw_consensus = normalize_pakistan_plate_syntax(raw_consensus)
 
     avg_confidence = float(np.mean(char_confs)) if char_confs else float(same_len_readings[0][1])
     return raw_consensus, avg_confidence
@@ -359,6 +396,8 @@ class VehicleTrackerManager:
         self.emitted_track_ids: Set[int] = set()
         self.recent_emitted_plates: Dict[str, Tuple[float, str]] = {}
         self.event_counter: int = 0
+        self._last_sec_key: Optional[str] = None
+        self._sec_seq_counter: int = 0
 
         # Async background snapshot saver
         self.snapshot_saver = AsyncSnapshotSaver()
@@ -514,7 +553,8 @@ class VehicleTrackerManager:
         if self.config.plate_format == "UK" and self.config.uk_syntax_correction and len(clean_text) == 7:
             clean_text = normalize_uk_plate_syntax(clean_text)
         elif self.config.plate_format == "PAKISTAN":
-            clean_text = normalize_pakistan_plate_syntax(clean_text)
+            if self.config.plate_syntax_correction:
+                clean_text = normalize_pakistan_plate_syntax(clean_text)
 
         if len(clean_text) < self.config.min_plate_length:
             return
@@ -545,6 +585,7 @@ class VehicleTrackerManager:
             regex_pattern=self.config.plate_regex_pattern if self.config.enforce_regex else None,
             uk_syntax_correction=self.config.uk_syntax_correction,
             plate_format=self.config.plate_format,
+            syntax_correction=self.config.plate_syntax_correction,
         )
 
         if consensus_result is not None:
@@ -711,8 +752,20 @@ class VehicleTrackerManager:
 
             self.recent_emitted_plates[plate_candidate] = (current_timestamp, f"EVT_{self.event_counter + 1}")
 
+        sec_key = now.strftime("%y%m%d%H%M%S")
+        if sec_key != self._last_sec_key:
+            self._last_sec_key = sec_key
+            self._sec_seq_counter = 0
+        else:
+            self._sec_seq_counter += 1
+
         self.event_counter += 1
-        event_id = generate_infinite_event_id(self.event_counter, self.config.camera_id, now)
+        event_id = generate_infinite_event_id(
+            node_id=self.config.node_id,
+            camera_id_str=self.config.camera_id,
+            now=now,
+            seq_idx=self._sec_seq_counter,
+        )
         if has_plate:
             self.recent_emitted_plates[track.best_plate_text] = (current_timestamp, event_id)
 

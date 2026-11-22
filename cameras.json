@@ -16,7 +16,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -27,7 +27,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -38,7 +38,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -49,7 +49,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -60,7 +60,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -71,7 +71,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -82,7 +82,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -93,7 +93,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -104,7 +104,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -115,7 +115,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -126,7 +126,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -137,7 +137,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -148,7 +148,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -159,7 +159,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -170,7 +170,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -181,7 +181,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -192,7 +192,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -203,7 +203,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -214,7 +214,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -225,7 +225,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -236,7 +236,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -247,7 +247,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -258,7 +258,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -269,7 +269,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -280,7 +280,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -291,7 +291,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -302,7 +302,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -313,7 +313,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -324,7 +324,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -335,7 +335,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -346,7 +346,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -357,7 +357,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -368,7 +368,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -379,7 +379,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -390,7 +390,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -401,7 +401,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -412,7 +412,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -423,7 +423,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -434,7 +434,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     },
     {
@@ -445,7 +445,7 @@
       "enabled": true,
       "target_fps": 10,
       "plate_format": "PAKISTAN",
-      "min_readable_vehicle_area": 10000.0,
+      "min_readable_vehicle_area": 2500.0,
       "roi_polygon": null
     }
   ]

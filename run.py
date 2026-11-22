@@ -51,6 +51,18 @@ def parse_args():
         help="License plate format standard (default: PAKISTAN).",
     )
     parser.add_argument(
+        "--node-id",
+        type=str,
+        default="A",
+        help="Node ID string for distributed deployment (default: 'A').",
+    )
+    parser.add_argument(
+        "--plate-syntax-correction",
+        action="store_true",
+        default=False,
+        help="Enable plate syntax normalization (default: False).",
+    )
+    parser.add_argument(
         "--output-video",
         type=str,
         default="output/annotated_output.mp4",
@@ -59,8 +71,8 @@ def parse_args():
     parser.add_argument(
         "--vehicle-conf",
         type=float,
-        default=0.35,
-        help="Confidence threshold for vehicle detection (default: 0.35).",
+        default=0.30,
+        help="Confidence threshold for vehicle detection (default: 0.30).",
     )
     parser.add_argument(
         "--alpr-interval",
@@ -95,8 +107,8 @@ def parse_args():
     parser.add_argument(
         "--min-area",
         type=float,
-        default=10000.0,
-        help="Minimum vehicle box area to be considered readable (default: 10000).",
+        default=2500.0,
+        help="Minimum vehicle box area to be considered readable (default: 2500).",
     )
     parser.add_argument(
         "--partial-plate-policy",
@@ -187,7 +199,9 @@ def main():
     # 1. Base Configuration
     config = PipelineConfig(
         camera_id=args.camera_id,
+        node_id=args.node_id,
         plate_format=args.plate_format,
+        plate_syntax_correction=args.plate_syntax_correction,
         vehicle_conf_thresh=args.vehicle_conf,
         alpr_frame_interval=args.alpr_interval,
         alpr_on_crops=args.alpr_on_crops,
