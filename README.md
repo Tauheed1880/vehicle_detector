@@ -17,10 +17,9 @@ Built on top of the open-source [FastALPR](https://github.com/ankandrew/fast-alp
 
 ## 2. Visual Demos
 
-![Vehicle Tracking and Plate Detection Demo](demo.gif)
+[<img src="https://i.imgflip.com/b6h7zd.gif" alt="Vehicle Tracking and Plate Detection Demo" width="600">](https://imgflip.com/gif/b6h7zd)
 
-![Events Slideshow](gallery/snapshots_slideshow.gif)
-*Events shown one by one: vehicle snapshot, plate crop, plate text, confidence*
+*Real-time Vehicle Detection, ByteTrack Tracking, and FastALPR License Plate Recognition*
 
 [Watch the full video: demo_annotated.mp4](demo_annotated.mp4)
 
