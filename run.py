@@ -139,6 +139,13 @@ def parse_args():
         help="Print verbose OCR reads and per-character confidences during execution.",
     )
     parser.add_argument(
+        "--no-plate-boxes",
+        dest="draw_plate_boxes",
+        action="store_false",
+        default=True,
+        help="Disable drawing green license plate bounding boxes in the annotated video.",
+    )
+    parser.add_argument(
         "--preview",
         action="store_true",
         default=True,
@@ -269,6 +276,7 @@ def main():
         box_smoothing_factor=args.box_smoothing,
         hud_box_smoothing_factor=args.hud_smoothing,
         debug_reads=args.debug_reads,
+        draw_plate_boxes=args.draw_plate_boxes,
         roi_polygon=roi_poly,
     )
 

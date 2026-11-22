@@ -526,6 +526,10 @@ class TrackState:
     # Lifecycle flags
     has_event_emitted: bool = False
     plate_confident_reached: bool = False
+    # Plate box visualization in video (Part B)
+    last_plate_box_frame: Optional[List[float]] = None
+    last_plate_box_frame_idx: int = -1
+    kalman_box: Optional[List[float]] = None
 
 
 class VehicleTrackerManager:
@@ -814,6 +818,11 @@ class VehicleTrackerManager:
                     )
                 return
 
+        # Keep last plate box visible for visualization (Part B)
+        if plate_bbox_frame is not None:
+            track.last_plate_box_frame = [float(v) for v in plate_bbox_frame]
+            track.last_plate_box_frame_idx = frame_idx
+
         raw_str = str(raw_text).strip().upper()
         if per_char_confs is None or len(per_char_confs) != len(raw_str):
             per_char_confs = [ocr_conf] * len(raw_str)
@@ -1084,6 +1093,14 @@ class VehicleTrackerManager:
                 or float(absorbed.best_plate_det_conf) > float(survivor.best_plate_det_conf)
             ):
                 survivor.best_plate_det_conf = float(absorbed.best_plate_det_conf)
+
+        if absorbed.last_plate_box_frame is not None:
+            if (
+                survivor.last_plate_box_frame is None
+                or absorbed.last_plate_box_frame_idx > survivor.last_plate_box_frame_idx
+            ):
+                survivor.last_plate_box_frame = absorbed.last_plate_box_frame
+                survivor.last_plate_box_frame_idx = absorbed.last_plate_box_frame_idx
 
         consensus_res = character_level_voting(
             readings=survivor.plate_readings,
@@ -1552,12 +1569,29 @@ class VehicleTrackerManager:
         return event_data
 
     def get_counts(self) -> Tuple[int, int, int, int, int]:
-        """Returns (total_unique, with_plate, without_plate, active, filtered_too_small)."""
-        active_count = sum(1 for t in self.tracks.values() if t.disappeared_count == 0)
+        """
+        Returns (total_unique, with_plate, without_plate, active, filtered_too_small).
+        Rule B6: Count a vehicle in 'Total Unique Vehicles' as soon as its track is confirmed
+        (not when it closes), and in 'Vehicles With Plate' as soon as a plate has been read.
+        At the end of the run the HUD totals must match the final summary table.
+        Merged tracks count once.
+        """
+        confirmed_active = [
+            t for t in self.tracks.values()
+            if t.stitched_into is None
+            and not t.has_event_emitted
+            and t.entered_readable_zone
+            and (t.frames_tracked >= self.config.min_track_frames)
+            and (t.has_complete_frame or t.max_vehicle_area >= self.config.min_readable_vehicle_area * 2.0)
+        ]
+        total_u = len(self.emitted_events) + len(confirmed_active)
+        total_p = sum(1 for e in self.emitted_events if e.get("number_plate")) + sum(1 for t in confirmed_active if t.best_plate_text)
+        total_np = max(0, total_u - total_p)
+        active_count = sum(1 for t in self.tracks.values() if t.disappeared_count == 0 and t.stitched_into is None)
         return (
-            self.total_unique_vehicles,
-            self.total_with_plate,
-            self.total_without_plate,
+            total_u,
+            total_p,
+            total_np,
             active_count,
             self.total_filtered_too_small,
         )

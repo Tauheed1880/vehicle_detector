@@ -600,7 +600,7 @@ class VehicleALPRPipeline:
                 t_draw_start = time.perf_counter()
                 annotated_frame = None
                 if self.config.save_video or self.config.show_preview:
-                    annotated_frame = self._render_frame(frame, live_fps=rolling_fps)
+                    annotated_frame = self._render_frame(frame, live_fps=rolling_fps, frame_idx=frame_idx)
                 prof_drawing += time.perf_counter() - t_draw_start
 
                 # ---------------------------------------------------------
@@ -884,7 +884,7 @@ class VehicleALPRPipeline:
 
         return self.tracker_manager.emitted_events
 
-    def _render_frame(self, frame: np.ndarray, live_fps: float = 0.0) -> np.ndarray:
+    def _render_frame(self, frame: np.ndarray, live_fps: float = 0.0, frame_idx: int = 0) -> np.ndarray:
         """Draws smoothed boxes, IDs, plate consensus, HUD dashboard, and optional ROI."""
         annotated = frame.copy()
         h, w = annotated.shape[:2]
@@ -894,6 +894,8 @@ class VehicleALPRPipeline:
             cv2.polylines(annotated, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
 
         for t_id, track in self.tracker_manager.tracks.items():
+            if track.stitched_into is not None:
+                continue
             if track.disappeared_count > 0 or track.smoothed_box is None:
                 continue
             if not track.entered_readable_zone and track.best_plate_text is None:
@@ -906,10 +908,11 @@ class VehicleALPRPipeline:
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
 
-            has_plate = track.best_plate_text is not None
-            box_color = (0, 255, 0) if has_plate else (0, 140, 255)
+            # Vehicle box is orange (0, 140, 255)
+            box_color = (0, 140, 255)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
 
+            has_plate = track.best_plate_text is not None
             if has_plate:
                 conf_pct = (track.best_plate_conf or 0.0) * 100.0
                 label = f"{track.global_id} | {track.best_plate_text} ({conf_pct:.0f}%)"
@@ -932,6 +935,54 @@ class VehicleALPRPipeline:
                 thickness,
                 cv2.LINE_AA,
             )
+
+            # Draw Plate Box in Video (Part B)
+            if self.config.draw_plate_boxes and track.last_plate_box_frame is not None:
+                frame_diff = frame_idx - track.last_plate_box_frame_idx
+                # Visible for up to 6 frames after last detection (B2)
+                if 0 <= frame_diff <= 6:
+                    px1, py1, px2, py2 = [int(v) for v in track.last_plate_box_frame]
+                    px1, py1 = max(0, px1), max(0, py1)
+                    px2, py2 = min(w, px2), min(h, py2)
+
+                    # Only if plate centre lies inside vehicle box (B3)
+                    pcx = (px1 + px2) / 2.0
+                    pcy = (py1 + py2) / 2.0
+                    if x1 <= pcx <= x2 and y1 <= pcy <= y2 and px2 > px1 and py2 > py1:
+                        # Bright green (0, 255, 0), thickness 3 (B1)
+                        cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 0), 3)
+
+                        if track.best_plate_text:
+                            p_conf_pct = (track.best_plate_conf or 0.0) * 100.0
+                            plate_label = f"{track.best_plate_text} {p_conf_pct:.0f}%"
+                        else:
+                            plate_label = "reading..."
+
+                        p_font_scale = 0.65
+                        p_thick = 2
+                        (ptw, pth), p_base = cv2.getTextSize(plate_label, font, p_font_scale, p_thick)
+
+                        # Label above the plate box (below if it would leave the frame)
+                        if py1 - pth - 8 >= 0:
+                            pl_y = py1 - 4
+                            pbg_y1 = py1 - pth - 8
+                            pbg_y2 = py1
+                        else:
+                            pl_y = py2 + pth + 4
+                            pbg_y1 = py2
+                            pbg_y2 = py2 + pth + 8
+
+                        cv2.rectangle(annotated, (px1, pbg_y1), (px1 + ptw + 6, pbg_y2), (0, 255, 0), -1)
+                        cv2.putText(
+                            annotated,
+                            plate_label,
+                            (px1 + 3, pl_y),
+                            font,
+                            p_font_scale,
+                            (0, 0, 0),
+                            p_thick,
+                            cv2.LINE_AA,
+                        )
 
         # Draw HUD Live Statistics Dashboard (Top-Left)
         u_cnt, p_cnt, np_cnt, act_cnt, small_cnt = self.tracker_manager.get_counts()
