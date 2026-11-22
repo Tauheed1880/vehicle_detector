@@ -1008,9 +1008,13 @@ class VehicleTrackerManager:
         2. Confident plate check: levenshtein <= 2 if both have confident plates.
         3. Box overlap: IoU > 0.25 or containment > 0.60.
         """
-        # Requirement A3: Plate-based stitching
-        time_gap = max(0, max(t1.first_frame_idx, t2.first_frame_idx) - min(t1.last_frame_idx, t2.last_frame_idx))
-        if time_gap <= 45:
+        # Requirement F2: Plate-based stitching
+        # Merge two tracks ONLY if they do NOT overlap in time (one track has already ended before
+        # the other starts, gap between 1 and 45 frames) AND their plates are identical or differ
+        # by <= 1 character ignoring "?". Never merge two tracks that are active at the same time through this rule.
+        t1_ends_before_t2 = (t1.last_frame_idx < t2.first_frame_idx) and (1 <= t2.first_frame_idx - t1.last_frame_idx <= 45)
+        t2_ends_before_t1 = (t2.last_frame_idx < t1.first_frame_idx) and (1 <= t1.first_frame_idx - t2.last_frame_idx <= 45)
+        if t1_ends_before_t2 or t2_ends_before_t1:
             p1 = t1.best_plate_text
             p2 = t2.best_plate_text
             if p1 and p2 and plates_match_differ_by_one(p1, p2):
