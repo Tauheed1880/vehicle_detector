@@ -619,6 +619,53 @@ class VehicleALPRPipeline:
             print(f"Annotated Video Output:        {Path(output_video_path).resolve()}")
         print("=" * 75 + "\n")
 
+        # ---------------------------------------------------------
+        # 12. Detected Plates List & Ground Truth Benchmark Evaluation
+        # ---------------------------------------------------------
+        detected_plates_with_conf = [
+            (e.get("number_plate"), e.get("number_plate_confidence"))
+            for e in self.tracker_manager.emitted_events
+            if e.get("number_plate")
+        ]
+
+        print("=" * 75)
+        print("                 DETECTED NUMBER PLATES")
+        print("=" * 75)
+        if detected_plates_with_conf:
+            for p_text, p_conf in detected_plates_with_conf:
+                c_str = f"(Confidence: {p_conf * 100:.1f}%)" if p_conf is not None else ""
+                print(f"  -> {p_text:<12} {c_str}")
+        else:
+            print("  (No license plates detected)")
+        print("-" * 75)
+
+        # UK Ground Truth Benchmark (13 Plates)
+        if self.config.plate_format.upper() == "UK":
+            uk_ground_truth = [
+                "NA13NRU", "GX15OGJ", "MW51VSU", "AP05JEO", "LM13VCV",
+                "EF10DZT", "LN15ZZC", "KH06KSU", "AF65JKV", "NA54KGJ",
+                "EY09VWS", "AV08HVF", "DA07CLX"
+            ]
+            detected_clean_set = set(p[0] for p in detected_plates_with_conf if p[0])
+            gt_set = set(uk_ground_truth)
+
+            matched = [p for p in uk_ground_truth if p in detected_clean_set]
+            missed = [p for p in uk_ground_truth if p not in detected_clean_set]
+            extra = [p for p in detected_clean_set if p not in gt_set]
+
+            print("           GROUND TRUTH EVALUATION REPORT (13 PLATES)")
+            print("-" * 75)
+            print(f"Match Score: {len(matched)}/13 ({len(matched)/13*100:.1f}%) | Missed: {len(missed)} | Extra: {len(extra)}")
+            print("-" * 75)
+            for g in uk_ground_truth:
+                status = "MATCHED [OK]" if g in detected_clean_set else "MISSED  [X ]"
+                print(f"  {g:<10} : {status}")
+            if extra:
+                print(f"\nExtra / Other Plates Detected ({len(extra)}):")
+                for ex in extra:
+                    print(f"  + {ex}")
+            print("=" * 75 + "\n")
+
         return self.tracker_manager.emitted_events
 
     def _render_frame(self, frame: np.ndarray, live_fps: float = 0.0) -> np.ndarray:

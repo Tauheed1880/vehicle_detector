@@ -47,8 +47,8 @@ def parse_args():
         "--plate-format",
         type=str,
         choices=["PAKISTAN", "GENERAL", "UK"],
-        default="PAKISTAN",
-        help="License plate format standard (default: PAKISTAN).",
+        default="UK",
+        help="License plate format standard (default: UK).",
     )
     parser.add_argument(
         "--node-id",

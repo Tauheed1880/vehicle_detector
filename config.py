@@ -72,16 +72,16 @@ class PipelineConfig:
     alpr_on_crops: bool = True
     alpr_crop_min_width: int = 608
 
-    # Plate Format Standard: "PAKISTAN", "GENERAL", or "UK"
-    plate_format: str = "PAKISTAN"
-    plate_country_code: str = "PK"
+    # Plate Format Standard: "UK", "PAKISTAN", or "GENERAL"
+    plate_format: str = "UK"
+    plate_country_code: str = "UK"
     plate_syntax_correction: bool = False
-    min_plate_length: int = 4              # Pakistani plates can be 4-8 chars (e.g. ICT123, LEA185001)
+    min_plate_length: int = 7              # UK standard format is 7 characters (e.g. AB12CDE)
     min_plate_sharpness: float = 25.0
     min_plate_reads_for_event: int = 2     # Minimum plate reads needed before declaring confident
     plate_regex_pattern: Optional[str] = None
     enforce_regex: bool = False
-    uk_syntax_correction: bool = False
+    uk_syntax_correction: bool = True
     # Partial plate policy: "drop" (ignore incomplete reads) or "keep_low_conf"
     partial_plate_policy: str = "drop"
 
