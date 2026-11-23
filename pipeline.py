@@ -28,8 +28,35 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from config import PipelineConfig
-from fast_alpr import ALPR
+from fast_alpr import ALPR, BaseDetector, DetectionResult
+from open_image_models.detection.core.base import BoundingBox
 from tracker import VehicleTrackerManager, filter_nested_boxes, levenshtein_distance
+
+
+class YOLOPlateDetector(BaseDetector):
+    """License plate detector backed by a custom Ultralytics YOLO (.pt) model."""
+
+    def __init__(self, model_path: str, conf_thresh: float = 0.35):
+        from ultralytics import YOLO
+
+        self.model = YOLO(model_path)
+        self.conf_thresh = conf_thresh
+
+    def predict(self, frame: np.ndarray) -> List[DetectionResult]:
+        results = self.model.predict(frame, conf=self.conf_thresh, verbose=False)
+        detections: List[DetectionResult] = []
+        if not results or results[0].boxes is None:
+            return detections
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+            detections.append(
+                DetectionResult(
+                    label="License Plate",
+                    confidence=float(box.conf[0]),
+                    bounding_box=BoundingBox(x1, y1, x2, y2),
+                )
+            )
+        return detections
 
 
 class ColabLivePreviewWorker:
@@ -224,7 +251,19 @@ class VehicleALPRPipeline:
                 f"OCR: {self.config.alpr_ocr_model}, Mode: {'CROPS' if self.config.alpr_on_crops else 'FULL-FRAME'})..."
             )
             try:
+                custom_detector = None
+                model_ref = str(self.config.alpr_detector_model)
+                if model_ref.lower().endswith(".pt"):
+                    model_path = Path(model_ref)
+                    if not model_path.is_file():
+                        model_path = REPO_ROOT / model_ref
+                    print(f"[LOAD] Loading custom plate detector: {model_path}...")
+                    custom_detector = YOLOPlateDetector(
+                        model_path=str(model_path),
+                        conf_thresh=self.config.alpr_detector_conf_thresh,
+                    )
                 self.alpr = ALPR(
+                    detector=custom_detector,
                     detector_model=self.config.alpr_detector_model,
                     detector_conf_thresh=self.config.alpr_detector_conf_thresh,
                     detector_providers=detector_providers,

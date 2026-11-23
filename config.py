@@ -31,7 +31,7 @@ class PipelineConfig:
     # 3. YOLOX (Apache-2.0)
     # 4. Enterprise Commercial License from Ultralytics
     # -------------------------------------------------------------
-    vehicle_model_name: str = "yolo11m.pt"  # Medium YOLO11 model
+    vehicle_model_name: str = "yolo26m.pt"  # Medium YOLO26 model
     vehicle_conf_thresh: float = 0.30       # Confidence threshold for vehicles
     vehicle_imgsz: int = 960                # Inference image size for YOLO
     vehicle_half_precision: bool = True     # Use FP16 half precision on CUDA
@@ -62,7 +62,7 @@ class PipelineConfig:
     # -------------------------------------------------------------
     # FastALPR License Plate Detection & OCR Configuration
     # -------------------------------------------------------------
-    alpr_detector_model: str = "yolo-v9-s-608-license-plate-end2end"
+    alpr_detector_model: str = "license-plate-finetune-v1l.pt"
     alpr_detector_conf_thresh: float = 0.35
     alpr_ocr_model: str = "cct-s-v2-global-model"
     # ALPR frame interval: Run ALPR every 3 frames on unresolved readable vehicles
